@@ -8,6 +8,9 @@ Q-learning. It is faster to collect and easier to defend in the presentation.
 
 ## Files
 
+- `hand_follow_controller.py`: quick laptop-camera demo. Tracks a hand with
+  MediaPipe and sends `AIM_ABS` commands so the Hub follows the hand.
+- `HAND_FOLLOW_TEST.md`: step-by-step hand-follow test plan.
 - `calibration_targeting.py`: recommended. Collects `dx,dy -> pan/tilt angle`
   calibration data and runs real-time interpolation.
 - `q_learning_aim_trainer.py`: run on the Raspberry Pi or laptop with the
@@ -21,6 +24,15 @@ Q-learning. It is faster to collect and easier to defend in the presentation.
 - `q_table.json`: created automatically after the first training episode.
 
 ## Recommended Calibration Workflow
+
+For the fastest hardware test, start with the hand-follow workflow:
+
+```bash
+pip install opencv-python mediapipe
+python3 Final_project/hand_follow_controller.py --dry-run
+```
+
+See `HAND_FOLLOW_TEST.md` for the Hub-side test sequence.
 
 Install dependencies on the Pi or camera laptop:
 
@@ -122,6 +134,13 @@ AIM,HOLD
 FIRE
 CENTER
 STOP
+```
+
+Current `FIRE` behavior:
+
+```text
+C motor 20 -> 200 at high speed to fire
+C motor 200 -> 20 to reload the next projectile
 ```
 
 The file has a `command_source()` function that should be replaced with the

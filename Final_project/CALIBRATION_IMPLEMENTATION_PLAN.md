@@ -54,6 +54,8 @@ lead_dy = dy + vy * lead_time
 - `rl_hub_runner.py`
   - Handles `AIM_ABS,horizontal,vertical`.
   - Clamps angles to mechanical limits.
+  - Uses the current firing cycle: C motor 20 -> 200 to fire, then
+    200 -> 20 to reload.
   - Reuses the same motor map as `ShootingCode.py`.
 
 ## Data Collection Strategy

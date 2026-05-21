@@ -37,10 +37,10 @@ A_SPEED = -100
 B_SPEED = -100
 KEEPALIVE_SECONDS = 0.02
 
-C_LOAD_TARGET = 65
-C_FIRE_TARGET = 70
-C_LOAD_SPEED = 10
-C_FIRE_SPEED = 50
+C_LOAD_TARGET = 20
+C_FIRE_TARGET = 200
+C_LOAD_SPEED = 50
+C_FIRE_SPEED = 100
 C_TOLERANCE = 1
 
 HORIZONTAL_CENTER_ANGLE = 0
@@ -125,56 +125,42 @@ def run_motor_to_target(motor, target_angle, speed, tolerance):
         wait_for_seconds(KEEPALIVE_SECONDS)
 
 
-def angle_0_to_359(degrees):
-    return degrees % 360
-
-
-def forward_delta_to(current_angle, target_angle):
-    delta = (target_angle - current_angle) % 360
-    if delta == 0:
-        return 360
-    return delta
-
-
-def make_c_target_raw(target_angle):
-    current_raw = c_motor.get_degrees_counted()
-    current_angle = angle_0_to_359(current_raw)
-    return current_raw + forward_delta_to(current_angle, target_angle)
-
-
 def run_c_to_raw_target(target_raw, speed):
     while True:
         if hub.left_button.was_pressed():
             stop_all()
             return False
 
-        current_raw = c_motor.get_degrees_counted()
-        remaining = target_raw - current_raw
-        if remaining <= C_TOLERANCE:
-            c_motor.stop()
+        arrived = update_position_motor(
+            c_motor,
+            target_raw,
+            speed,
+            C_TOLERANCE,
+        )
+        if arrived:
             return True
 
-        c_motor.start(speed)
         wait_for_seconds(KEEPALIVE_SECONDS)
 
 
 def load_launcher():
-    return run_c_to_raw_target(make_c_target_raw(C_LOAD_TARGET), C_LOAD_SPEED)
+    return run_c_to_raw_target(C_LOAD_TARGET, C_LOAD_SPEED)
 
 
 def fire_once():
     hub.light_matrix.write("FIR")
     start_launch_wheels()
 
-    if not load_launcher():
+    fired = run_c_to_raw_target(C_FIRE_TARGET, C_FIRE_SPEED)
+    if not fired:
+        launch_pair.stop()
         return False
-    wait_for_seconds(0.15)
 
-    fired = run_c_to_raw_target(make_c_target_raw(C_FIRE_TARGET), C_FIRE_SPEED)
+    loaded = load_launcher()
     launch_pair.stop()
-    if fired:
+    if loaded:
         hub.light_matrix.write("OK")
-    return fired
+    return loaded
 
 
 def apply_aim_action(action):
@@ -341,7 +327,7 @@ def command_source():
 
 def main():
     stop_all()
-    c_motor.set_degrees_counted(C_FIRE_TARGET)
+    c_motor.set_degrees_counted(C_LOAD_TARGET)
     vertical_motor.set_degrees_counted(VERTICAL_LOW_ANGLE)
     horizontal_motor.set_degrees_counted(HORIZONTAL_CENTER_ANGLE)
     hub.light_matrix.write("RL")
