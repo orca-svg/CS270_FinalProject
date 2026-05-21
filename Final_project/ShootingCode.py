@@ -27,9 +27,13 @@ ENABLE_VERTICAL_MOVE = False
 
 C_LOAD_TARGET = 20
 C_FIRE_TARGET = 200
-C_LOAD_SPEED = 50
+C_LOAD_SPEED = 100 # Increased to 100 for fast loading
 C_FIRE_SPEED = 100
-C_TOLERANCE = 1
+C_LOAD_DELAY = 0.5 # Delay for ammo to fall down and load (seconds)
+C_FIRE_STABILIZE_DELAY = 0.5 # Delay to stabilize after firing (seconds)
+C_BACKWARD_DELAY = 0.5 # Delay to stabilize after going backward (seconds)
+C_BACKWARD_DEGREE = 200
+C_TOLERANCE = 10
 
 VERTICAL_LOW_ANGLE = 0
 VERTICAL_HIGH_ANGLE = 80
@@ -54,22 +58,33 @@ def start_launch_wheels():
     launch_pair.start_tank(A_SPEED, B_SPEED)
 
 
-def signed_speed_to_target(current, target, speed, tolerance):
+def signed_speed_to_target(current, target, speed, tolerance, proportional=False):
     error = target - current
     if abs(error) <= tolerance:
         return 0
+    
+    if proportional:
+        # Slow down as the motor gets closer to the target (Proportional Control)
+        kp = 0.5
+        calculated_speed = int(abs(error) * kp)
+        # Prevent motor from stalling by clamping speed to a minimum of 20
+        actual_speed = min(speed, max(20, calculated_speed))
+    else:
+        actual_speed = speed
+
     if error > 0:
-        return speed
-    return -speed
+        return actual_speed
+    return -actual_speed
 
 
-def update_position_motor(motor, target_angle, speed, tolerance):
+def update_position_motor(motor, target_angle, speed, tolerance, proportional=False):
     current_angle = motor.get_degrees_counted()
     motor_speed = signed_speed_to_target(
         current_angle,
         target_angle,
         speed,
         tolerance,
+        proportional,
     )
 
     if motor_speed == 0:
@@ -91,16 +106,20 @@ def update_c_motor(state, target_raw, can_fire):
             target_raw,
             C_LOAD_SPEED,
             C_TOLERANCE,
+            proportional=True, # Apply proportional slowdown for 200 -> 20 loading
         )
         if arrived:
+            timer.reset() # Start timing for physical reload gap
             return "loaded", target_raw, False
 
         return state, target_raw, False
 
     if state == "loaded":
         c_motor.stop()
-        if can_fire:
-            return "firing", C_FIRE_TARGET, False
+        # Wait until the loading delay has completed, then transition to firing if allowed
+        if timer.now() >= C_LOAD_DELAY:
+            if can_fire:
+                return "firing", C_FIRE_TARGET, False
         return state, target_raw, False
 
     if state == "firing":
@@ -111,8 +130,48 @@ def update_c_motor(state, target_raw, can_fire):
             C_TOLERANCE,
         )
         if arrived:
-            return "fired", target_raw, True
+            timer.reset()
+            # Capture actual position for precise relative movement
+            actual_angle = c_motor.get_degrees_counted()
+            return "firing_stabilizing", actual_angle, False
 
+        return state, target_raw, False
+
+    if state == "firing_stabilizing":
+        c_motor.stop()
+        if timer.now() >= C_FIRE_STABILIZE_DELAY:
+            new_target = target_raw - C_BACKWARD_DEGREE
+            return "firing_backward", new_target, False
+        return state, target_raw, False
+
+    if state == "firing_backward":
+        arrived = update_position_motor(
+            c_motor,
+            target_raw,
+            C_FIRE_SPEED,
+            C_TOLERANCE,
+        )
+        if arrived:
+            timer.reset()
+            return "firing_backward_stabilizing", target_raw, False
+        return state, target_raw, False
+
+    if state == "firing_backward_stabilizing":
+        c_motor.stop()
+        if timer.now() >= C_BACKWARD_DELAY:
+            new_target = target_raw + C_BACKWARD_DEGREE
+            return "firing_forward", new_target, False
+        return state, target_raw, False
+
+    if state == "firing_forward":
+        arrived = update_position_motor(
+            c_motor,
+            target_raw,
+            C_FIRE_SPEED,
+            C_TOLERANCE,
+        )
+        if arrived:
+            return "fired", target_raw, True
         return state, target_raw, False
 
     c_motor.stop()

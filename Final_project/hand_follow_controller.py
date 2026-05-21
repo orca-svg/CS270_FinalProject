@@ -22,11 +22,13 @@ from typing import Optional, Tuple
 try:
     import cv2
     import mediapipe as mp
+    import serial
 except ModuleNotFoundError as exc:
     missing_package = exc.name
+    pip_name = "pyserial" if missing_package == "serial" else missing_package
     raise SystemExit(
         f"Missing required package: {missing_package}. "
-        "Install dependencies with `pip install opencv-python mediapipe`."
+        f"Install dependencies with `pip install opencv-python mediapipe pyserial`."
     ) from exc
 
 
@@ -65,6 +67,18 @@ class TcpCommandSender(CommandSender):
         self.sock.close()
 
 
+class SerialCommandSender(CommandSender):
+    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 1.0) -> None:
+        self.ser = serial.Serial(port, baudrate, timeout=timeout)
+        time.sleep(2) # Allow connection to stabilize
+
+    def send(self, command: str) -> None:
+        self.ser.write((command.strip() + "\n").encode("utf-8"))
+
+    def close(self) -> None:
+        self.ser.close()
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -78,8 +92,10 @@ def smooth(previous: Optional[float], current: float, alpha: float) -> float:
 def make_sender(args: argparse.Namespace) -> CommandSender:
     if args.dry_run:
         return PrintCommandSender()
+    if args.serial_port:
+        return SerialCommandSender(args.serial_port, args.baudrate, args.socket_timeout)
     if not args.host:
-        raise ValueError("Use --dry-run or pass --host for TCP command sending.")
+        raise ValueError("Use --dry-run, --serial-port, or pass --host for TCP command sending.")
     return TcpCommandSender(args.host, args.port, args.socket_timeout)
 
 
@@ -190,8 +206,10 @@ def run(args: argparse.Namespace) -> None:
         sender.close()
         raise RuntimeError(f"Could not open camera {args.camera}")
 
-    mp_hands = mp.solutions.hands
-    mp_draw = mp.solutions.drawing_utils
+    # Initialize MediaPipe Hands
+    from mediapipe.python.solutions import hands as mp_hands
+    from mediapipe.python.solutions import drawing_utils as mp_draw
+    
     last_send_time = 0.0
     smoothed_h = None
     smoothed_v = None
@@ -260,6 +278,8 @@ def run(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Print commands only.")
+    parser.add_argument("--serial-port", help="USB/Bluetooth serial port of the SPIKE Hub (e.g. /dev/tty.LEGOHub).")
+    parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument("--host", help="TCP host for a Hub command bridge.")
     parser.add_argument("--port", type=int, default=9999)
     parser.add_argument("--socket-timeout", type=float, default=3.0)

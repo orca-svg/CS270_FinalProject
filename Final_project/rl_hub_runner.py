@@ -18,6 +18,23 @@ can be typed into the SPIKE console with input().
 
 from spike import Motor, MotorPair, PrimeHub
 from spike.control import wait_for_seconds
+import sys
+
+# Try to import uselect for non-blocking stdin polling.
+try:
+    import uselect
+    has_uselect = True
+except ImportError:
+    has_uselect = False
+
+# Setup poll object if uselect is supported by the Hub firmware.
+poll_obj = None
+if has_uselect:
+    try:
+        poll_obj = uselect.poll()
+        poll_obj.register(sys.stdin, uselect.POLLIN)
+    except Exception:
+        has_uselect = False
 
 
 hub = PrimeHub()
@@ -39,9 +56,13 @@ KEEPALIVE_SECONDS = 0.02
 
 C_LOAD_TARGET = 20
 C_FIRE_TARGET = 200
-C_LOAD_SPEED = 50
+C_LOAD_SPEED = 100 # Increased to 100 for fast loading
 C_FIRE_SPEED = 100
-C_TOLERANCE = 1
+C_LOAD_DELAY = 0.5 # Delay for ammo to fall down and load (seconds)
+C_FIRE_STABILIZE_DELAY = 0.5 # Delay to stabilize after firing (seconds)
+C_BACKWARD_DELAY = 0.5 # Delay to stabilize after going backward (seconds)
+C_BACKWARD_DEGREE = 200
+C_TOLERANCE = 10
 
 HORIZONTAL_CENTER_ANGLE = 0
 HORIZONTAL_MIN_ANGLE = -35
@@ -87,22 +108,33 @@ def start_launch_wheels():
     launch_pair.start_tank(A_SPEED, B_SPEED)
 
 
-def signed_speed_to_target(current, target, speed, tolerance):
+def signed_speed_to_target(current, target, speed, tolerance, proportional=False):
     error = target - current
     if abs(error) <= tolerance:
         return 0
+    
+    if proportional:
+        # Slow down as the motor gets closer to the target (Proportional Control)
+        kp = 0.5
+        calculated_speed = int(abs(error) * kp)
+        # Prevent motor from stalling by clamping speed to a minimum of 20
+        actual_speed = min(speed, max(20, calculated_speed))
+    else:
+        actual_speed = speed
+
     if error > 0:
-        return speed
-    return -speed
+        return actual_speed
+    return -actual_speed
 
 
-def update_position_motor(motor, target_angle, speed, tolerance):
+def update_position_motor(motor, target_angle, speed, tolerance, proportional=False):
     current_angle = motor.get_degrees_counted()
     motor_speed = signed_speed_to_target(
         current_angle,
         target_angle,
         speed,
         tolerance,
+        proportional,
     )
 
     if motor_speed == 0:
@@ -125,7 +157,7 @@ def run_motor_to_target(motor, target_angle, speed, tolerance):
         wait_for_seconds(KEEPALIVE_SECONDS)
 
 
-def run_c_to_raw_target(target_raw, speed):
+def run_c_to_raw_target(target_raw, speed, proportional=False):
     while True:
         if hub.left_button.was_pressed():
             stop_all()
@@ -136,6 +168,7 @@ def run_c_to_raw_target(target_raw, speed):
             target_raw,
             speed,
             C_TOLERANCE,
+            proportional,
         )
         if arrived:
             return True
@@ -144,22 +177,46 @@ def run_c_to_raw_target(target_raw, speed):
 
 
 def load_launcher():
-    return run_c_to_raw_target(C_LOAD_TARGET, C_LOAD_SPEED)
+    return run_c_to_raw_target(C_LOAD_TARGET, C_LOAD_SPEED, proportional=True)
 
 
 def fire_once():
     hub.light_matrix.write("FIR")
     start_launch_wheels()
 
+    # 1. Forward to fire target (200)
     fired = run_c_to_raw_target(C_FIRE_TARGET, C_FIRE_SPEED)
     if not fired:
         launch_pair.stop()
         return False
 
+    # 2. Stabilize at fire target (0.5s delay)
+    c_motor.stop()
+    wait_for_seconds(C_FIRE_STABILIZE_DELAY)
+
+    # 3. Move backward (200 - 200 = 0)
+    backward_target = C_FIRE_TARGET - C_BACKWARD_DEGREE
+    backwarded = run_c_to_raw_target(backward_target, C_FIRE_SPEED)
+    if not backwarded:
+        launch_pair.stop()
+        return False
+
+    # 4. Stabilize at backward target (0.5s delay)
+    c_motor.stop()
+    wait_for_seconds(C_BACKWARD_DELAY)
+
+    # 5. Move forward to target again (0 + 200 = 200)
+    forwarded = run_c_to_raw_target(C_FIRE_TARGET, C_FIRE_SPEED)
+    if not forwarded:
+        launch_pair.stop()
+        return False
+
+    # 6. Load launcher back to 20
     loaded = load_launcher()
     launch_pair.stop()
     if loaded:
         hub.light_matrix.write("OK")
+        wait_for_seconds(C_LOAD_DELAY) # Wait for physical ammunition reload
     return loaded
 
 
@@ -312,17 +369,44 @@ def center_launcher():
 
 
 def command_source():
-    """Yield command strings.
+    """Yield command strings from serial interface.
 
-    Replace this function with the Bluetooth PAN/socket receiver from the
-    class skeleton when available.
+    Uses non-blocking stdin polling if uselect is available, allowing physical
+    hub buttons to remain responsive. Otherwise, falls back to blocking readline.
     """
+    global has_uselect, poll_obj
 
-    while True:
-        try:
-            yield input("cmd> ")
-        except KeyboardInterrupt:
-            yield "STOP"
+    if has_uselect and poll_obj is not None:
+        buffer = ""
+        while True:
+            try:
+                events = poll_obj.poll(10) # Poll with 10ms timeout
+                if events:
+                    char = sys.stdin.read(1)
+                    if char == '\n' or char == '\r':
+                        clean_cmd = buffer.strip()
+                        if clean_cmd:
+                            yield clean_cmd
+                        buffer = ""
+                    else:
+                        buffer += char
+                else:
+                    yield "" # Yield empty string to keep loop spinning and checking buttons
+            except Exception:
+                yield ""
+    else:
+        # Fallback to blocking readline if uselect is not available.
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if line:
+                    yield line.strip()
+                else:
+                    yield ""
+            except KeyboardInterrupt:
+                yield "STOP"
+            except Exception:
+                yield ""
 
 
 def main():

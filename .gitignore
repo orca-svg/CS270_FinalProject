@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Workspace / Editor configurations
+.vscode/
+.idea/
+
+# Local task / agent configurations
+.system_generated/
+
+# Other projects in this directory
+Grid_project/
+grid_logic_visualizer/
+.claude/
