@@ -52,6 +52,7 @@ PAN_SPEED  = 600    # deg/s for track_target
 TILT_SPEED = 500
 GAIN       = 0.05   # degrees of target change per 1 unit of error
 COMMAND_TIMEOUT_MS = 1000
+RDY_INTERVAL_MS   = 200  # rdy를 못 받은 Mac을 복구하기 위한 주기적 재전송 간격
 
 # --- C motor constants (왕복 방식) ---
 # 시작 위치(0°) = 장전 완료 상태. 로봇을 장전 위치에 놓고 Run할 것.
@@ -167,6 +168,7 @@ def main():
     tilt_target = 0.0
     can_fire    = False
     last_cmd_ms = watch.time()
+    last_rdy_ms = watch.time()
     running = True
 
     while running:
@@ -189,6 +191,15 @@ def main():
             # Acknowledge: ready for next packet
             try:
                 stdout.buffer.write(b"rdy")
+                last_rdy_ms = watch.time()
+            except Exception:
+                pass
+
+        # --- periodic rdy heartbeat: rdy 손실 시 Mac 데드락 복구 ---
+        elif watch.time() - last_rdy_ms >= RDY_INTERVAL_MS:
+            try:
+                stdout.buffer.write(b"rdy")
+                last_rdy_ms = watch.time()
             except Exception:
                 pass
 
