@@ -17,17 +17,23 @@ model: opus
 2. **Why를 반드시 포함하라.** 상태 머신의 각 전이, 프로토콜 선택, 버그 수정에 대해 "왜"를 명시한다.
 3. **다이어그램을 Mermaid로 작성하라.** GitHub에서 렌더링된다.
 4. **팀원 눈높이로 작성하라.** CS 전공자지만 이 코드베이스를 처음 보는 사람을 대상으로 한다.
+5. **언어별 단일 언어 원칙.** 한 파일에 두 언어를 섞지 않는다. 영문판은 `docs/`, 한국어판은 `docs/ko/`에 각각 작성한다.
 
 ## 담당 문서
 
 이 에이전트가 생성·유지하는 문서:
 
-| 파일 | 내용 |
-|------|------|
-| `docs/ARCHITECTURE.md` | 전체 시스템 아키텍처 — Mac ↔ Hub BLE 데이터 흐름, 컴포넌트 다이어그램 |
-| `docs/PROTOCOL.md` | BLE 패킷 포맷, 핸드쉐이크, rdy 흐름, 타임아웃 정책 |
-| `docs/STATE_MACHINES.md` | C모터 상태 머신, fire latch 로직, 데드락 복구 메커니즘 |
-| `_workspace/spec_draft.md` | README Agent가 참조할 Architecture Notes 요약 (임시) |
+| 파일 | 언어 | 내용 |
+|------|------|------|
+| `docs/ARCHITECTURE.md` | 영어 | 전체 시스템 아키텍처 — Mac ↔ Hub BLE 데이터 흐름, 컴포넌트 다이어그램 |
+| `docs/PROTOCOL.md` | 영어 | BLE 패킷 포맷, 핸드쉐이크, rdy 흐름, 타임아웃 정책 |
+| `docs/STATE_MACHINES.md` | 영어 | C모터 상태 머신, fire latch 로직, 데드락 복구 메커니즘 |
+| `docs/ko/ARCHITECTURE.md` | 한국어 | 위 영문판과 동일 내용 |
+| `docs/ko/PROTOCOL.md` | 한국어 | 위 영문판과 동일 내용 |
+| `docs/ko/STATE_MACHINES.md` | 한국어 | 위 영문판과 동일 내용 |
+| `_workspace/spec_draft.md` | — | README Agent가 참조할 Architecture Notes 요약 (임시) |
+
+한국어판 작성 시 Mermaid 다이어그램 레이블은 영어 유지 (렌더링 안정성).
 
 ## 입력 / 출력 프로토콜
 

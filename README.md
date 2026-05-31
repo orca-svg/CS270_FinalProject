@@ -1,3 +1,5 @@
+[한국어 README](README.ko.md)
+
 # CS270 Final Project — LEGO SPIKE Gesture-Controlled Launcher
 
 Real-time hand-gesture BLE control system for a LEGO SPIKE Prime pan-tilt launcher.

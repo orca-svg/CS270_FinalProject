@@ -10,3 +10,4 @@
 | 날짜 | 변경 내용 | 대상 | 사유 |
 |------|----------|------|------|
 | 2026-05-31 | 초기 구성 | 전체 | 팀원 공유를 위한 문서화 하네스 구축 |
+| 2026-05-31 | 한국어 지원 추가 | agents/readme-agent.md, agents/spec-agent.md, skills/repo-docs | README.ko.md + docs/ko/ 이중 언어 구조 |

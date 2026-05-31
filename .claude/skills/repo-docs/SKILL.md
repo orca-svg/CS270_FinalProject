@@ -4,7 +4,9 @@ description: >
   CS270 FinalProject GitHub 저장소의 문서를 관리하는 오케스트레이터.
   README 업데이트, 기술 스펙 작성, 현재 동작 방식 서술, 팀원 공유용 문서 생성 요청 시 반드시 이 스킬을 사용하라.
   "README 고쳐줘", "스펙 문서 만들어줘", "이게 어떻게 동작해?", "팀원한테 설명할 자료 만들어줘",
-  "프로토콜 문서화해줘", "아키텍처 설명해줘", "설치 방법 정리해줘" 등의 요청이 트리거다.
+  "프로토콜 문서화해줘", "아키텍처 설명해줘", "설치 방법 정리해줘",
+  "한국어로 번역해줘", "한국어 버전 만들어줘", "docs 한국어 지원", "README.ko 만들어줘",
+  "다시 실행", "업데이트해줘", "최신화해줘" 등의 요청이 트리거다.
   단순 코드 질문(버그 수정, 기능 추가)은 이 스킬 없이 직접 응답한다.
 ---
 
@@ -34,6 +36,11 @@ README, 기술 스펙, 동작 방식 문서를 에이전트 팀이 병렬로 작
    - **README만** → readme-agent만 실행
    - **스펙/동작/아키텍처/프로토콜** → spec-agent만 실행
    - **전체 / 팀 공유 준비** → 두 에이전트 모두 실행
+   - **한국어 지원 / 번역** → 두 에이전트 모두 실행 (언어=한국어 지시)
+4. 언어 범위 결정:
+   - "한국어만" → `README.ko.md` + `docs/ko/` 만 생성
+   - "영어만" → `README.md` + `docs/` 만 생성
+   - 미지정 또는 "둘 다" → 두 언어 모두 생성
 
 ---
 
@@ -109,6 +116,33 @@ git -C <repo_path> push origin main
 ```
 
 ---
+
+### 한국어 전용 실행 시
+
+**readme-agent 지시 (Agent 도구, model: opus):**
+```
+CS270_FinalProject 저장소의 README.ko.md를 한국어로 작성하라.
+README.md를 원본으로 읽고, 동일한 구조와 내용으로 한국어 번역본을 생성한다.
+- 파일 상단에 [English README](README.md) 링크 포함
+- 기술 용어(BLE, argparse, GATT 등)는 영어 유지
+- 코드 블록·커맨드·상수는 번역하지 않음
+- 버전·날짜 표시 금지
+출력: README.ko.md 생성 (Write 도구)
+```
+
+**spec-agent 지시 (Agent 도구, model: opus):**
+```
+CS270_FinalProject 저장소의 docs/ko/ 디렉토리에 한국어 스펙 문서 3개를 생성하라.
+docs/ 하위 영문 파일을 원본으로 읽고, 동일한 구조·내용·Mermaid 다이어그램으로 한국어 번역본을 생성한다.
+- docs/ko/ARCHITECTURE.md
+- docs/ko/PROTOCOL.md
+- docs/ko/STATE_MACHINES.md
+규칙:
+- Mermaid 다이어그램 레이블은 영어 유지 (렌더링 안정성)
+- 기술 용어·상수·코드 블록은 번역하지 않음
+- 각 파일 상단에 [English version](../파일명.md) 링크 포함
+출력: docs/ko/ 하위 3개 파일 생성 (Write 도구)
+```
 
 ## 에러 핸들링
 

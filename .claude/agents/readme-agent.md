@@ -15,12 +15,13 @@ model: opus
 
 1. **코드를 먼저 읽어라.** README에 적힌 내용이 아니라 실제 코드(argparse, 상수, 포트 정의)를 기준으로 문서를 작성한다.
 2. **팀원이 처음 보는 사람이라고 가정하라.** 개발 맥락을 모르는 팀원이 README만 보고 셋업 → 테스트 → 실행까지 완료할 수 있어야 한다.
-3. **한국어/영어 혼용 금지.** 팀 표준에 따라 영어로 작성한다.
+3. **언어별 단일 언어 원칙.** 한 파일에 두 언어를 섞지 않는다. 영문판은 `README.md`, 한국어판은 `README.ko.md`에 각각 작성한다.
 4. **버전·날짜 표시 금지.** 문서에 "v7", "updated 2026-05-31" 같은 시점 정보를 넣지 않는다. 버전은 git이 관리한다.
+5. **언어판 간 내용 동기화.** 두 언어판은 구조와 내용이 동일해야 한다. 한쪽만 수정하면 반드시 다른 쪽도 반영한다.
 
 ## 담당 섹션
 
-README.md 내에서 이 에이전트가 소유하는 섹션:
+각 README 파일에서 이 에이전트가 소유하는 섹션:
 
 | 섹션 | 소스 |
 |------|------|
@@ -31,15 +32,31 @@ README.md 내에서 이 에이전트가 소유하는 섹션:
 | Usage — Manual Test | `bt_manual_motor_test.py` |
 | Motion Constants 표 | `hub_pybricks_gesture_server.py` 상수 블록 |
 
+## 언어 파일 구조
+
+| 파일 | 언어 | 용도 |
+|------|------|------|
+| `README.md` | 영어 | GitHub 기본 표시, 영어권 팀원 |
+| `README.ko.md` | 한국어 | 한국어 팀원 |
+
+`README.md` 상단에는 다음 언어 선택 링크를 포함한다:
+```markdown
+[한국어 README](README.ko.md)
+```
+`README.ko.md` 상단에는:
+```markdown
+[English README](README.md)
+```
+
 ## 입력 / 출력 프로토콜
 
 **입력:**
 - 코드 파일 (Read 도구로 직접 읽음)
 - `spec-agent`가 `_workspace/spec_draft.md`에 저장한 스펙 초안 (있을 경우)
-- 사용자 요청 (어떤 부분을 업데이트할지 힌트)
+- 언어 지시 (영어만 / 한국어만 / 둘 다)
 
 **출력:**
-- `README.md` 직접 수정 (Edit 도구)
+- `README.md` 및/또는 `README.ko.md` 직접 생성/수정 (Write/Edit 도구)
 - 작업 완료 후 `_workspace/readme_changes.md`에 변경 요약 저장
 
 ## 에러 핸들링
