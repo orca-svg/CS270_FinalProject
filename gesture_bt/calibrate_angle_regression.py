@@ -1,15 +1,40 @@
 #!/usr/bin/env python3
 """
-Fit a camera-coordinate to turret-angle calibration model.
+Train camera-coordinate to turret-angle calibration weights.
 
-This script trains the quadratic regression used by the launcher:
+Purpose:
+    This script is used after fixed-target calibration. For each fixed target,
+    record the target center seen by the laptop camera and the pan/tilt angles
+    that actually hit that target. The script fits a quadratic regression model
+    that maps camera pixel coordinates to launcher angles.
 
+Input CSV format:
+    x,y,pan_angle,tilt_angle
+    320,240,90,45
+    260,240,84,45
+    380,240,96,45
+
+Model:
     pan_angle  = a0 + a1*x + a2*y + a3*x*y + a4*x^2 + a5*y^2
     tilt_angle = b0 + b1*x + b2*y + b3*x*y + b4*x^2 + b5*y^2
 
-Input CSV rows should contain measured target image coordinates and the
-pan/tilt angles that actually hit the fixed target. The resulting weights can
-be copied into the vision controller or saved as JSON for later loading.
+Calculation:
+    1. Convert each (x, y) sample into [1, x, y, x*y, x^2, y^2].
+    2. Solve the least-squares normal equation (X^T X)w = X^T y.
+    3. Produce PAN_WEIGHTS = [a0, a1, a2, a3, a4, a5].
+    4. Produce TILT_WEIGHTS = [b0, b1, b2, b3, b4, b5].
+
+Output:
+    - Human-readable pan/tilt regression equations.
+    - Python constants that can be copied into the vision controller.
+    - Fit metrics comparing predicted angles with measured hit angles.
+    - Optional JSON file containing weights and metrics.
+    - Optional prediction for one target coordinate via --predict X Y.
+
+Example:
+    python3 gesture_bt/calibrate_angle_regression.py --write-template calibration_samples.csv
+    python3 gesture_bt/calibrate_angle_regression.py --csv calibration_samples.csv \
+        --out angle_weights.json --predict 350 240
 """
 
 from __future__ import annotations
@@ -249,8 +274,8 @@ def main() -> int:
     print(format_equation("Tilt model", "tilt_angle", tilt_weights))
     print()
     print("Python constants:")
-    print(f"PAN_WEIGHTS = {pan_weights.tolist()}")
-    print(f"TILT_WEIGHTS = {tilt_weights.tolist()}")
+    print(f"PAN_WEIGHTS = {pan_weights}")
+    print(f"TILT_WEIGHTS = {tilt_weights}")
     print()
     print("Fit metrics:")
     for name, value in metrics.items():
@@ -276,8 +301,8 @@ def main() -> int:
         payload = {
             "model": "quadratic_xy_to_pan_tilt",
             "features": FEATURE_NAMES,
-            "pan_weights": pan_weights.tolist(),
-            "tilt_weights": tilt_weights.tolist(),
+            "pan_weights": pan_weights,
+            "tilt_weights": tilt_weights,
             "metrics": metrics,
         }
         args.out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
