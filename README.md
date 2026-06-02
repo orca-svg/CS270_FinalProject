@@ -229,46 +229,52 @@ in front of the camera:
   center and `fire=1` is sent to the Hub.
 - Press `q` to quit.
 
-## Current Progress & Roadmap
-
-### Done ✅
-
-- 4-byte BLE protocol with `rdy` flow control + 200 ms heartbeat (deadlock recovery)
-- Hub firmware: per-block `try/except`, top-level crash guard, safety timeout
-- Manual motor test path (`bt_manual_motor_test.py`)
-- Red-object detection (HSV masking, largest-contour selection)
-- Parabolic prediction (velocity + vertical acceleration, EMA-smoothed)
-- **Fixed-camera → absolute motor-angle mapping** (independent camera/turret)
-- C-motor reciprocating fire state machine with auto-fire trigger
-
-### Next steps 🔜 (priority order)
-
-| # | Item | Why it matters | Device needed? |
-|---|------|----------------|----------------|
-| 1 | **Camera↔turret calibration** | The current pixel→angle map is a *linear guess*. Because the camera is independent of the turret, a target at pixel (px,py) does not trivially correspond to a motor angle. A calibration step (sample known targets, fit a mapping) is the biggest accuracy lever. Repo already has `Final_project/calibration_targeting.py` + `CALIBRATION_IMPLEMENTATION_PLAN.md` to build on. | Yes (slots) |
-| 2 | **Add `--no-ble` / camera-only mode** | The controller currently *requires* the robot to run. A no-BLE mode lets vision/prediction work proceed on a laptop without monopolising the single device — unblocks parallel teamwork. | No |
-| 3 | **FLIGHT_TIME / drop calibration** | One hardcoded constant. Measure real projectile flight time and (optionally) make it distance-dependent for accurate lead. | Yes (slots) |
-| 4 | **Latency compensation** | BLE + processing delay adds to effective lead time. Measure end-to-end latency and fold it into the prediction horizon. | Yes (slots) |
-| 5 | **CLI args** | Hub name, camera index, and HSV range are hardcoded. Add `argparse` so each team member can run without editing source. | No |
-| 6 | **Target robustness** | Add min/max area gating, tracking continuity across frames, and lost-target recovery to reduce false locks. | No |
-| 7 | **Evaluation & logging** | Log hit rate and prediction error to CSV for the final report; design a repeatable test target. | Partial |
-
-## Team Workflow (5 members, 1 shared device)
-
-**Defined roles**
+## 👥 Team & Roles (confirmed)
 
 | Member | Role | Focus |
 |--------|------|-------|
-| P1 | Hardware Engineer | Robot build, launcher mechanism, motor mounting, wiring |
-| P2 | HW↔SW Integration | Hub firmware, BLE protocol, calibration bridge, fire timing |
+| **P1** | 🔧 Hardware Engineer | Robot build, launcher mechanism, motor mounting, wiring |
+| **P2** | 🔗 HW↔SW Integration | Hub firmware, BLE protocol, calibration bridge, fire timing |
+| **P3** | 👁️ Vision Engineer | Red detection robustness, target tracking |
+| **P4** | 📐 Prediction / Algorithm | Parabolic model, FLIGHT_TIME, latency compensation, lead-shot math |
+| **P5** | 🎯 Calibration & Test / Docs | Calibration procedure, evaluation harness, device-session ops, docs |
 
-**Suggested roles for the remaining three**
+## 📊 Project Dashboard
 
-| Member | Role | Focus |
-|--------|------|-------|
-| P3 | Vision Engineer | Red detection robustness, target tracking (roadmap #6) |
-| P4 | Prediction / Algorithm | Parabolic model, FLIGHT_TIME, latency comp, lead-shot math (roadmap #3, #4) |
-| P5 | Calibration & Test / Docs | Calibration procedure (#1), evaluation harness (#7), run device sessions, docs |
+**Status legend:** ✅ Done · 🔜 Next (in progress) · ⬜ Planned
+
+### Status at a glance
+
+| Module | Status | Owner |
+|--------|:------:|:-----:|
+| BLE 4-byte protocol + `rdy` flow control / heartbeat | ✅ | P2 |
+| Hub firmware (crash guard, safety timeout) | ✅ | P2 |
+| Manual motor test (`bt_manual_motor_test.py`) | ✅ | P2 |
+| Red-object detection (HSV, largest contour) | ✅ | P3 |
+| Parabolic prediction (velocity + acceleration, EMA) | ✅ | P4 |
+| Fixed-camera → absolute motor-angle mapping | ✅ | P4 · P2 |
+| C-motor reciprocating fire state machine | ✅ | P1 · P2 |
+| Camera↔turret calibration | 🔜 | P5 · P2 |
+| `--no-ble` / camera-only mode | 🔜 | P5 |
+| FLIGHT_TIME / drop calibration | ⬜ | P4 · P5 |
+| Latency compensation | ⬜ | P4 |
+| CLI args (hub-name, camera, HSV) | ⬜ | P3 |
+| Target robustness (area gating, tracking, recovery) | ⬜ | P3 |
+| Evaluation & logging (hit rate, error → CSV) | ⬜ | P5 |
+
+### To-do detail (priority order)
+
+| # | Item | Owner | Why it matters | Device? |
+|:-:|------|:-----:|----------------|:-------:|
+| 1 | **Camera↔turret calibration** | P5 · P2 | The current pixel→angle map is a *linear guess*. Because the camera is independent of the turret, a target at pixel (px,py) does not trivially correspond to a motor angle. A calibration step (sample known targets, fit a mapping) is the biggest accuracy lever. Repo already has `Final_project/calibration_targeting.py` + `CALIBRATION_IMPLEMENTATION_PLAN.md` to build on. | 🔴 Yes |
+| 2 | **Add `--no-ble` / camera-only mode** | P5 | The controller currently *requires* the robot to run. A no-BLE mode lets vision/prediction work proceed on a laptop without monopolising the single device — unblocks parallel teamwork. | 🟢 No |
+| 3 | **FLIGHT_TIME / drop calibration** | P4 · P5 | One hardcoded constant. Measure real projectile flight time and (optionally) make it distance-dependent for accurate lead. | 🔴 Yes |
+| 4 | **Latency compensation** | P4 | BLE + processing delay adds to effective lead time. Measure end-to-end latency and fold it into the prediction horizon. | 🔴 Yes |
+| 5 | **CLI args** | P3 | Hub name, camera index, and HSV range are hardcoded. Add `argparse` so each team member can run without editing source. | 🟢 No |
+| 6 | **Target robustness** | P3 | Add min/max area gating, tracking continuity across frames, and lost-target recovery to reduce false locks. | 🟢 No |
+| 7 | **Evaluation & logging** | P5 | Log hit rate and prediction error to CSV for the final report; design a repeatable test target. | 🟡 Partial |
+
+## 🗂️ Team Workflow (5 members, 1 shared device)
 
 ### Parallel vs. sequential — the single-device constraint
 
