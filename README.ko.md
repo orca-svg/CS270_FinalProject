@@ -71,7 +71,6 @@ gesture_bt/
 
 docs/                            # 심화 기술 문서 (영문 + ko/)
   ARCHITECTURE.md  PROTOCOL.md  STATE_MACHINES.md  PREDICTION.md
-  CHANGELOG.md                   # 변경 이력 아카이브 (원인 → 변경 → 해결)
 ```
 
 MediaPipe hand-landmarker 모델은 최초 실행 시 다운로드되며 Git에서 무시된다.
@@ -120,8 +119,7 @@ Mac이 `[Hub] ...`로 출력하는 상태 라인을 전송한다: `READY`, `ARME
 > 📖 상세: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 > [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) ·
-> [`docs/PREDICTION.md`](docs/PREDICTION.md) ·
-> [`docs/ko/CHANGELOG.md`](docs/ko/CHANGELOG.md) (변경 이력)
+> [`docs/PREDICTION.md`](docs/PREDICTION.md)
 
 ---
 
