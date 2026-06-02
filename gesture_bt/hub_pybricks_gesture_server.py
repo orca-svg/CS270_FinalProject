@@ -1,6 +1,6 @@
 # hub_pybricks_gesture_server.py
 # LEGO SPIKE Prime Hub + Pybricks BLE stdin/stdout bridge.
-# V8: position-tracking + fire state machine
+# Current Hub program: position-tracking + fire state machine
 #
 # PC sends exactly 4 bytes per command (after 0x06 prefix):
 #   b'M', pan_err_i8, tilt_err_i8, fire(0/1)
@@ -42,15 +42,15 @@ tilt_motor = safe_motor(Port.D, "D_TILT")
 pan_motor  = safe_motor(Port.F, "F_PAN")
 
 # --- motion constants (tune these if directions/ranges are wrong) ---
-# 웹캠은 포탑과 독립. Mac이 픽셀 좌표를 절대 각도로 직접 변환하여 전송한다.
-# Pan  byte: [-100, +100] → [PAN_MIN, PAN_MAX]
-# Tilt byte: [-100, +100] → [TILT_MIN, TILT_MAX]  (-100=TILT_MIN, +100=TILT_MAX)
+PAN_SIGN   = 1      # flip to -1 if pan moves opposite direction
+TILT_SIGN  = 1      # flip to -1 if tilt moves opposite direction
 PAN_MIN    = -35    # degrees
 PAN_MAX    =  35
 TILT_MIN   =   0
 TILT_MAX   =  80
 PAN_SPEED  = 600    # deg/s for track_target
 TILT_SPEED = 500
+GAIN       = 0.05   # degrees of target change per 1 unit of error
 COMMAND_TIMEOUT_MS = 1000
 RDY_INTERVAL_MS   = 200  # rdy를 못 받은 Mac을 복구하기 위한 주기적 재전송 간격
 
@@ -70,6 +70,36 @@ LAUNCH_PWM_B = -100
 keyboard = poll()
 keyboard.register(stdin)
 watch = StopWatch()
+
+# --- 수신 프레이밍 (디싱크 자가 치유) ---
+# stdin은 4바이트 프레임의 연속이지만, 부분 읽기/바이트 유실/재시작 잔여 바이트로
+# 정렬이 깨질 수 있다. opcode가 유효하지 않으면 1바이트씩 버려 재동기화한다.
+rx_buf = bytearray()
+VALID_OPCODES = (ord("M"), ord("S"))
+RX_BUF_MAX = 64  # 폭주 시 메모리 보호
+
+# --- 루프 예외를 조용히 삼키지 않고 노출 (1초당 1회로 throttle) ---
+_last_err_ms = 0
+
+
+def loop_err(tag, exc):
+    global _last_err_ms
+    now = watch.time()
+    if now - _last_err_ms > 1000:
+        write_line("ERR_" + tag + ":" + str(exc))
+        _last_err_ms = now
+
+
+def drain_stdin():
+    """시작 시 재시작 이전에 남은 잔여 바이트를 비워 디싱크를 예방한다."""
+    dropped = 0
+    while keyboard.poll(0):
+        b = stdin.buffer.read(1)
+        if not b:
+            break
+        dropped += 1
+    if dropped:
+        write_line("FLUSH_STDIN:" + str(dropped))
 
 
 def clamp(value, low, high):
@@ -100,6 +130,26 @@ def start_launcher_wheels():
         launch_r.dc(LAUNCH_PWM_B)
 
 
+def angle_text(motor):
+    if motor is None:
+        return "NA"
+    try:
+        return str(motor.angle())
+    except Exception:
+        return "ERR"
+
+
+def write_angle_log(label, pan_target, tilt_target):
+    write_line(
+        label
+        + " pan_F=" + angle_text(pan_motor)
+        + " tilt_D=" + angle_text(tilt_motor)
+        + " c_C=" + angle_text(c_motor)
+        + " target_pan=" + str(int(pan_target))
+        + " target_tilt=" + str(int(tilt_target))
+    )
+
+
 # --- C motor state machine (왕복 방식) ---
 # armed   : 장전 완료(0°), 발사 대기. 모터 정지.
 # firing  : 전진 → C_FIRE_ANGLE° (발사/고무줄 해제)
@@ -108,7 +158,7 @@ def start_launcher_wheels():
 c_state = "armed"
 
 
-def c_update(can_fire):
+def c_update(can_fire, pan_target, tilt_target):
     global c_state
     if c_motor is None:
         return False
@@ -119,10 +169,12 @@ def c_update(can_fire):
         if can_fire:
             c_motor.dc(C_FIRE_DC)
             c_state = "firing"
+            write_angle_log("SHOT_START", pan_target, tilt_target)
             write_line("FIRING")
 
     elif c_state == "firing":
         if now >= C_FIRE_ANGLE - C_TOLERANCE:
+            write_angle_log("SHOT_RELEASE", pan_target, tilt_target)
             c_motor.dc(-C_RETURN_DC)
             c_state = "returning"
             write_line("RETURNING")
@@ -131,6 +183,7 @@ def c_update(can_fire):
         if now <= C_TOLERANCE:
             c_motor.stop()
             c_state = "armed"
+            write_angle_log("SHOT_DONE", pan_target, tilt_target)
             write_line("ARMED")
             return True  # 발사+재장전 완료
 
@@ -158,6 +211,10 @@ def main():
     while hub.buttons.pressed():
         wait(20)
 
+    # 재시작 시 이전 세션의 잔여 stdin 바이트를 비워 디싱크를 예방
+    rx_buf[:] = b""
+    drain_stdin()
+
     # Send initial rdy so Mac can begin
     try:
         stdout.buffer.write(b"rdy")
@@ -172,37 +229,41 @@ def main():
     running = True
 
     while running:
-        # --- non-blocking BLE packet check ---
-        if keyboard.poll(0):
-            data = stdin.buffer.read(4)
-            if data and len(data) == 4:
-                opcode = data[0]
-                if opcode == ord("M"):
-                    pan_val  = i8(data[1])   # -100..+100
-                    tilt_val = i8(data[2])   # -100..+100
-                    fire     = data[3]
-                    # 절대 각도 직접 설정 (고정 카메라 → 독립 모터 구조)
-                    # pan_val: -100 → PAN_MIN(-35°), +100 → PAN_MAX(+35°)
-                    pan_target  = clamp(pan_val  / 100.0 * PAN_MAX,
-                                        PAN_MIN, PAN_MAX)
-                    # tilt_val: -100 → TILT_MIN(0°), +100 → TILT_MAX(80°)
-                    tilt_target = clamp(
-                        (tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
-                        TILT_MIN, TILT_MAX)
-                    if fire == 1:
-                        can_fire = True   # latch until shot fires
-                    last_cmd_ms = watch.time()
-                elif opcode == ord("S"):
-                    running = False
-            # Acknowledge: ready for next packet
-            try:
-                stdout.buffer.write(b"rdy")
-                last_rdy_ms = watch.time()
-            except Exception:
-                pass
+        # --- 사용 가능한 모든 바이트를 1바이트씩 비차단으로 흡수 ---
+        while keyboard.poll(0):
+            b = stdin.buffer.read(1)
+            if not b:
+                break
+            rx_buf.extend(b)
+        # 폭주 시 메모리 보호: 뒤쪽 RX_BUF_MAX 바이트만 유지
+        if len(rx_buf) > RX_BUF_MAX:
+            del rx_buf[0:len(rx_buf) - RX_BUF_MAX]
 
-        # --- periodic rdy heartbeat: rdy 손실 시 Mac 데드락 복구 ---
-        elif watch.time() - last_rdy_ms >= RDY_INTERVAL_MS:
+        # --- 완전한 4바이트 프레임 처리 (자가 치유 재동기화) ---
+        processed = False
+        while len(rx_buf) >= 4:
+            if rx_buf[0] not in VALID_OPCODES:
+                # 정렬이 깨짐 → 1바이트 버리고 재동기화
+                del rx_buf[0]
+                continue
+            opcode = rx_buf[0]
+            d1, d2, d3 = rx_buf[1], rx_buf[2], rx_buf[3]
+            del rx_buf[0:4]
+            if opcode == ord("M"):
+                pan_err  = i8(d1)
+                tilt_err = i8(d2)
+                fire     = d3
+                pan_target  = clamp(pan_target  - PAN_SIGN  * pan_err  * GAIN, PAN_MIN,  PAN_MAX)
+                tilt_target = clamp(tilt_target - TILT_SIGN * tilt_err * GAIN, TILT_MIN, TILT_MAX)
+                if fire == 1:
+                    can_fire = True   # latch until shot fires
+                last_cmd_ms = watch.time()
+            elif opcode == ord("S"):
+                running = False
+            processed = True
+
+        # --- rdy: 패킷을 처리했거나 주기적 하트비트 시점이면 송신 ---
+        if processed or (watch.time() - last_rdy_ms >= RDY_INTERVAL_MS):
             try:
                 stdout.buffer.write(b"rdy")
                 last_rdy_ms = watch.time()
@@ -215,17 +276,17 @@ def main():
                 pan_motor.track_target(int(pan_target))
             if tilt_motor:
                 tilt_motor.track_target(int(tilt_target))
-        except Exception:
-            pass
+        except Exception as e:
+            loop_err("TRACK", e)
 
         # --- C motor state machine ---
         try:
-            shot_fired = c_update(can_fire)
+            shot_fired = c_update(can_fire, pan_target, tilt_target)
             if shot_fired:
                 write_line("FIRED")
                 can_fire = False   # 래치 해제, 다음 주먹 = 다음 발사
-        except Exception:
-            pass
+        except Exception as e:
+            loop_err("CMOTOR", e)
 
         # --- safety timeout ---
         if watch.time() - last_cmd_ms > COMMAND_TIMEOUT_MS:
@@ -234,6 +295,7 @@ def main():
 
         # --- hub button emergency stop ---
         if hub.buttons.pressed():
+            write_line("BTN_STOP")
             running = False
 
         wait(5)
@@ -244,6 +306,11 @@ def main():
 
 try:
     main()
-except BaseException:
+except BaseException as e:
+    # 왜 멈췄는지 Mac 로그에 남긴다 (연결이 살아있으면 전달됨)
+    try:
+        write_line("FATAL:" + str(e))
+    except Exception:
+        pass
     stop_all()
     hub.display.text("X")

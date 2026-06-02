@@ -1,372 +1,265 @@
-[한국어 README](README.ko.md)
+# CS270 Final Project — LEGO SPIKE Pybricks BLE Launcher
 
-# CS270 Final Project — LEGO SPIKE Auto-Aiming Launcher
+[Korean README](README.ko.md)
 
-Real-time computer-vision aimbot for a LEGO SPIKE Prime pan-tilt launcher.
-A Mac with a **fixed webcam** detects a red object, predicts its parabolic
-trajectory, converts the predicted screen position into **absolute pan/tilt motor
-angles**, and fires automatically when the target is aligned — all over BLE to a
-Pybricks Hub.
+Real-time computer-vision control for a LEGO SPIKE Prime pan-tilt launcher.
+The project direction is now fixed on **Mac/Python → Pybricks BLE → SPIKE Hub**.
+The shared repository is intentionally scoped to the current Pybricks BLE
+implementation, project documentation, and reproducible run/test instructions.
 
-> **Design note — camera and motors are independent.** The webcam is mounted
-> separately from the turret and does **not** move with the pan/tilt motors.
-> The controller therefore maps each pixel position to an *absolute* motor angle
-> (not an incremental correction). See [How It Works](#how-it-works) and
-> [Roadmap](#current-progress--roadmap).
+## Project Direction
+
+Primary architecture:
+
+```text
+Mac / laptop
+  gesture_bt/gesture_bt_controller.py   # hand gesture control
+  gesture_bt/balloon_intercept.py       # C-RAM style target interception
+        |
+        | Pybricks BLE, GATT c5f50002-8280-46da-89f4-6d8051e4aeef
+        v
+SPIKE Prime Hub
+  gesture_bt/hub_pybricks_gesture_server.py
+        |
+        v
+Motors A/B/C/D/F
+```
 
 ## Quick Start
 
 ```bash
-# 1. Clone and enter the gesture_bt directory
 git clone https://github.com/orca-svg/CS270_FinalProject.git
 cd CS270_FinalProject/gesture_bt
 
-# 2. Create a virtualenv and install dependencies
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements_gesture_bt.txt
 
-# 3. Manual BLE + motor test (Hub must be running)
-python bt_manual_motor_test.py --hub-name "Team5"
+# 1. Upload hub_pybricks_gesture_server.py in Pybricks Code, run once, then disconnect.
+# 2. Start the saved Hub program with the Hub center button when the Mac connects.
 
-# 4. Full aimbot mode
-python gesture_bt_controller.py
+python bt_manual_motor_test.py --hub-name "Team5"
+python gesture_bt_controller.py --hub-name "Team5" --print-sends
+python balloon_intercept.py --hub-name "Team5" --color-picker --print-sends
 ```
 
 ## Repository Structure
 
 ```text
 gesture_bt/
-  gesture_bt_controller.py       # Mac-side: red-object tracker + parabolic predictor + auto-fire
-  hub_pybricks_gesture_server.py # Hub-side: Pybricks BLE server + motor state machine
-  bt_manual_motor_test.py        # Manual BLE motor test (no camera)
-  requirements_gesture_bt.txt    # Mac-side Python dependencies
-  models/                        # (legacy) MediaPipe model — no longer used by controller
+  pybricks_ble.py               # Shared Pybricks BLE scan/reconnect/diagnostic client
+  gesture_bt_controller.py       # Mac-side hand gesture controller over Pybricks BLE
+  balloon_intercept.py           # HSV target detection, parabolic lead-shot prediction, auto-fire
+  hub_pybricks_gesture_server.py # Hub-side Pybricks BLE server and motor state machine
+  bt_manual_motor_test.py        # BLE + motor path test without camera logic
+  requirements_gesture_bt.txt
 
-Final_project/
-  calibration_targeting.py       # Calibration-based aiming prototype (see Roadmap)
-  q_learning_aim_trainer.py      # Q-learning aiming prototype
-  rl_hub_runner.py               # SPIKE Hub command runner
-  hand_follow_controller.py      # Hand-follow prototype
-  OpenCV.py                      # OpenCV experiment
-  ShootingCode.py                # Launcher firing experiment
-  CALIBRATION_IMPLEMENTATION_PLAN.md
-  README_Q_LEARNING.md
-  HAND_FOLLOW_TEST.md
-
-docs/                            # Reserved for project documentation
+docs/
+  ARCHITECTURE.md                # Current Pybricks BLE architecture
+  PROTOCOL.md                    # 4-byte Pybricks BLE protocol
+  STATE_MACHINES.md              # Hub and Mac control state machines
+  PREDICTION.md                  # Parabolic target prediction model
+  ko/                            # Korean technical docs
 ```
 
-## Hardware
+The MediaPipe hand landmarker model is downloaded on first run and ignored by
+Git. Local harness files are also ignored so the GitHub repository stays focused
+for teammates, instructors, and TAs.
 
-Port assignments from `hub_pybricks_gesture_server.py`:
+## Hardware Map
 
 | Port | Motor | Role |
 |------|-------|------|
-| A | `launch_l` | Left launcher wheel (PWM +100) |
-| B | `launch_r` | Right launcher wheel (PWM −100, opposite direction) |
-| C | `c_motor` | Fire/reload mechanism (reciprocating) |
-| D | `tilt_motor` | Tilt axis (0°–80°) |
-| F | `pan_motor` | Pan axis (−35°–+35°) |
+| A | `launch_l` | Left launcher wheel |
+| B | `launch_r` | Right launcher wheel, opposite direction |
+| C | `c_motor` | Fire/reload mechanism |
+| D | `tilt_motor` | Tilt axis |
+| F | `pan_motor` | Pan axis |
 
-Missing motors are tolerated: each port is probed with `safe_motor`, which logs
-`PORT_<label>_OK` or `PORT_<label>_MISSING` and returns `None` on failure.
-
-## How It Works
-
-### Controller (`gesture_bt_controller.py`)
-
-The aimbot loop runs at camera frame rate (640×480) and does five things each frame:
-
-**1. Red object detection (HSV color masking)**
-
-```python
-mask1 = cv2.inRange(hsv, [0,  120, 70], [10,  255, 255])   # lower red hue
-mask2 = cv2.inRange(hsv, [170,120, 70], [180, 255, 255])   # upper red hue
-```
-
-The largest red contour above 500 px² is the target. A green bounding box and
-center dot are drawn on the preview.
-
-**2. Velocity + acceleration estimation**
-
-```
-vx = (target_x - prev_x) / dt        # raw velocity (px/s)
-vy = (target_y - prev_y) / dt
-
-vx_smooth = SMOOTHING * vx + (1-SMOOTHING) * vx_smooth     # EMA filter
-vy_smooth = SMOOTHING * vy + (1-SMOOTHING) * vy_smooth
-
-ay = (vy_smooth - prev_vy) / dt      # raw vertical acceleration
-ay_smooth = ACCEL_SMOOTHING * ay + (1-ACCEL_SMOOTHING) * ay_smooth
-```
-
-**3. Parabolic intercept prediction**
-
-```
-predict_x = target_x + vx_smooth * FLIGHT_TIME
-predict_y = target_y + vy_smooth * FLIGHT_TIME + 0.5 * ay_smooth * FLIGHT_TIME²
-```
-
-The predicted point is visualised with a red circle and a yellow line from the
-current position.
-
-**4. Pixel → absolute motor angle (fixed-camera mapping)**
-
-Because the camera is fixed and the motors move independently, the predicted
-pixel is mapped directly to an absolute motor angle by `pixel_to_motor_vals()`:
-
-```
-pan:  px = 0 (left)   → −35°      px = 640 (right)  → +35°
-tilt: py = 0 (top)    →  80° (up) py = 480 (bottom) →  0° (down)
-```
-
-Both values are normalised to the BLE byte range `[-100, +100]` before sending.
-
-**5. Aim and auto-fire**
-
-```
-if abs(predict_x - CENTER_X) < FIRE_PX and abs(predict_y - CENTER_Y) < FIRE_PX:
-    fire_trigger = 1     # "FIRE!!!" shown on preview
-```
-
-Every `SEND_INTERVAL` (100 ms) the Mac sends `M, pan_val, tilt_val, fire_trigger`
-(4-byte packet) to the Hub. The Hub sets the absolute target angle and fires the
-C-motor state machine on `fire=1`.
-
-### Tuning Constants
-
-Edit these at the top of `gesture_bt_controller.py`. **`PAN_MAX_DEG` /
-`TILT_MIN_DEG` / `TILT_MAX_DEG` must match the Hub constants exactly.**
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `HUB_NAME` | `"Team5"` | Pybricks BLE hub name |
-| `PAN_MAX_DEG` | `35` | Pan range ±deg (must equal Hub `PAN_MAX`) |
-| `TILT_MIN_DEG` / `TILT_MAX_DEG` | `0` / `80` | Tilt range (must equal Hub `TILT_MIN`/`TILT_MAX`) |
-| `FLIGHT_TIME` | `0.4` s | Estimated projectile flight time; increase for longer range |
-| `SMOOTHING` | `0.3` | Velocity EMA weight (higher = faster but noisier) |
-| `ACCEL_SMOOTHING` | `0.05` | Acceleration EMA weight (keep low to suppress noise) |
-| `FIRE_PX` | `20` px | Auto-fire when predicted error < this on both axes |
-| `SEND_INTERVAL` | `0.1` s | BLE command rate |
-
-## Setup
-
-### 1. Hub (Pybricks)
-
-1. Go to [Pybricks Code](https://code.pybricks.com) and connect to the SPIKE Hub.
-2. Upload `gesture_bt/hub_pybricks_gesture_server.py`.
-3. **Position the robot at the zero/loaded state**: pan, tilt, and the C motor all
-   call `reset_angle(0)` at startup, so the physical pose at launch becomes the
-   reference (pan center, tilt down at 0°, C motor fully loaded).
-4. Run once to verify `READY` and `rdy` appear; then Stop and **disconnect
-   Pybricks Code** so the Mac BLE client can connect.
-5. The Hub program starts when you press the Hub center button.
-
-### 2. Mac — Install dependencies
-
-```bash
-cd CS270_FinalProject/gesture_bt
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements_gesture_bt.txt
-```
-
-Dependencies:
-
-```text
-opencv-python
-mediapipe>=0.10.30
-numpy
-bleak
-```
-
-> `mediapipe` is listed for compatibility. The aimbot controller does **not**
-> use MediaPipe; it uses OpenCV HSV color masking only.
-
-### 3. Manual BLE test (no camera)
-
-With the Hub running its saved program, confirm BLE + motor wiring:
-
-```bash
-python bt_manual_motor_test.py --hub-name "Team5"
-```
-
-When the terminal says `BLE connected`, press the Hub center button once.
-
-Expected output:
-
-```text
-[Hub] READY
-[Hub] ARMED
-Hub rdy received. Starting fixed-packet motor test...
-[SEND] M,100,0,0 -> b'M\x64\x00\x00'
-...
-[SEND] M,0,0,1 -> b'M\x00\x00\x01'
-[Hub] FIRING
-[Hub] RETURNING
-[Hub] ARMED
-[Hub] FIRED
-Manual motor test done.
-```
-
-### 4. Aimbot mode
-
-```bash
-python gesture_bt_controller.py
-```
-
-The hub name is hardcoded as `HUB_NAME = "Team5"` in the script. Edit it if your
-Hub has a different name.
-
-When BLE connects, press the Hub center button. A camera preview window titled
-**"Aimbot System (Parabolic Prediction)"** appears. Hold or throw a **red object**
-in front of the camera:
-
-- A green box tracks the detected object.
-- A yellow line shows the predicted intercept point (red circle).
-- **"FIRE!!!"** appears when the predicted point is within `FIRE_PX` of the frame
-  center and `fire=1` is sent to the Hub.
-- Press `q` to quit.
-
-## 👥 Team & Roles (confirmed)
-
-| Member | Role | Focus |
-|--------|------|-------|
-| **P1** | 🔧 Hardware Engineer | Robot build, launcher mechanism, motor mounting, wiring |
-| **P2** | 🔗 HW↔SW Integration | Hub firmware, BLE protocol, calibration bridge, fire timing |
-| **P3** | 👁️ Vision Engineer | Red detection robustness, target tracking |
-| **P4** | 📐 Prediction / Algorithm | Parabolic model, FLIGHT_TIME, latency compensation, lead-shot math |
-| **P5** | 🎯 Calibration & Test / Docs | Calibration procedure, evaluation harness, device-session ops, docs |
-
-## 📊 Project Dashboard
-
-**Status legend:** ✅ Done · 🔜 Next (in progress) · ⬜ Planned
-
-### Status at a glance
-
-| Module | Status | Owner |
-|--------|:------:|:-----:|
-| BLE 4-byte protocol + `rdy` flow control / heartbeat | ✅ | P2 |
-| Hub firmware (crash guard, safety timeout) | ✅ | P2 |
-| Manual motor test (`bt_manual_motor_test.py`) | ✅ | P2 |
-| Red-object detection (HSV, largest contour) | ✅ | P3 |
-| Parabolic prediction (velocity + acceleration, EMA) | ✅ | P4 |
-| Fixed-camera → absolute motor-angle mapping | ✅ | P4 · P2 |
-| C-motor reciprocating fire state machine | ✅ | P1 · P2 |
-| Camera↔turret calibration | 🔜 | P5 · P2 |
-| `--no-ble` / camera-only mode | 🔜 | P5 |
-| FLIGHT_TIME / drop calibration | ⬜ | P4 · P5 |
-| Latency compensation | ⬜ | P4 |
-| CLI args (hub-name, camera, HSV) | ⬜ | P3 |
-| Target robustness (area gating, tracking, recovery) | ⬜ | P3 |
-| Evaluation & logging (hit rate, error → CSV) | ⬜ | P5 |
-
-### To-do detail (priority order)
-
-| # | Item | Owner | Why it matters | Device? |
-|:-:|------|:-----:|----------------|:-------:|
-| 1 | **Camera↔turret calibration** | P5 · P2 | The current pixel→angle map is a *linear guess*. Because the camera is independent of the turret, a target at pixel (px,py) does not trivially correspond to a motor angle. A calibration step (sample known targets, fit a mapping) is the biggest accuracy lever. Repo already has `Final_project/calibration_targeting.py` + `CALIBRATION_IMPLEMENTATION_PLAN.md` to build on. | 🔴 Yes |
-| 2 | **Add `--no-ble` / camera-only mode** | P5 | The controller currently *requires* the robot to run. A no-BLE mode lets vision/prediction work proceed on a laptop without monopolising the single device — unblocks parallel teamwork. | 🟢 No |
-| 3 | **FLIGHT_TIME / drop calibration** | P4 · P5 | One hardcoded constant. Measure real projectile flight time and (optionally) make it distance-dependent for accurate lead. | 🔴 Yes |
-| 4 | **Latency compensation** | P4 | BLE + processing delay adds to effective lead time. Measure end-to-end latency and fold it into the prediction horizon. | 🔴 Yes |
-| 5 | **CLI args** | P3 | Hub name, camera index, and HSV range are hardcoded. Add `argparse` so each team member can run without editing source. | 🟢 No |
-| 6 | **Target robustness** | P3 | Add min/max area gating, tracking continuity across frames, and lost-target recovery to reduce false locks. | 🟢 No |
-| 7 | **Evaluation & logging** | P5 | Log hit rate and prediction error to CSV for the final report; design a repeatable test target. | 🟡 Partial |
-
-## 🗂️ Team Workflow (5 members, 1 shared device)
-
-### Parallel vs. sequential — the single-device constraint
-
-Only **one robot exists**, so device-dependent work must be **time-shared in
-booked slots**, while device-free work runs fully in parallel.
-
-**Device-FREE work — anyone, anytime, in parallel (no robot):**
-
-- Vision tuning on recorded clips / live webcam — *requires roadmap #2 (`--no-ble` mode)*
-- Prediction algorithm development & offline validation
-- Pixel→angle math and calibration-model design
-- CLI args, logging/evaluation harness, documentation & report
-
-**Device-DEPENDENT work — must reserve the robot (one team at a time):**
-
-- HW build & mechanical tuning (P1)
-- Hub firmware flash + BLE/motor bring-up (P2)
-- Live angle calibration (P2 + P5)
-- FLIGHT_TIME measurement & live firing tests (P4 + P5)
-- End-to-end integration runs (all)
-
-### Suggested phased schedule
-
-| Phase | Has the device | Working in parallel (no device) |
-|-------|----------------|--------------------------------|
-| **1. Build & bring-up** | P1 builds robot; P2 flashes firmware & runs `bt_manual_motor_test.py` in short slots | P3 vision on webcam, P4 prediction on recorded video, P5 builds `--no-ble` mode (#2) + calibration plan |
-| **2. Calibration** | P2 + P5 run calibration sessions (#1) | P3/P4 keep refining offline; P5 finalises eval harness (#7) |
-| **3. Integration & tuning** | Scheduled slots for end-to-end runs, FLIGHT_TIME (#3) & latency (#4) | Whoever is not on the device tunes constants from logged data and writes the report |
-
-> **Tip:** Do as much as possible device-free. Landing roadmap #2 (`--no-ble`
-> mode) early multiplies the team's effective throughput, since 3 of 5 members
-> can then make progress without ever touching the robot.
+The Hub code probes each port with `safe_motor()`. Missing motors are logged as
+`PORT_<label>_MISSING`, so D/F pan-tilt tests can still run while A/B/C hardware
+is incomplete.
 
 ## BLE Protocol
 
-Mac → Hub: 4-byte fixed packet, written to the Pybricks command characteristic
-(`c5f50002-8280-46da-89f4-6d8051e4aeef`) with a leading `0x06` Pybricks prefix.
+Mac writes to the Pybricks command/event characteristic with a leading `0x06`
+prefix. The Hub reads exactly 4 bytes per command and self-recovers if byte
+alignment is lost.
 
-| Byte | Field | Description |
-|------|-------|-------------|
-| 0 | Opcode | `M` (`0x4D`) = motor command, `S` (`0x53`) = stop and exit |
-| 1 | pan_val | Absolute pan angle, `[-100, +100]` → `[PAN_MIN, PAN_MAX]`, sent as `value & 0xFF` |
-| 2 | tilt_val | Absolute tilt angle, `[-100, +100]` → `[TILT_MIN, TILT_MAX]`, sent as `value & 0xFF` |
-| 3 | fire | 0 normally, 1 when predicted error < `FIRE_PX` on both axes |
+| Byte | Field | Meaning |
+|------|-------|---------|
+| 0 | opcode | `M` = motion/fire command, `S` = stop and exit |
+| 1 | `pan_err_i8` | Signed pan error, `[-100, 100]` encoded as `value & 0xFF` |
+| 2 | `tilt_err_i8` | Signed tilt error, `[-100, 100]` encoded as `value & 0xFF` |
+| 3 | `fire` | `1` latches one firing cycle, otherwise `0` |
 
-Hub → Mac: the Hub replies `b"rdy"` after each packet. The Mac waits on this
-before sending the next packet (1 s timeout, silently skipped on failure).
-Status lines (`READY`, `ARMED`, `FIRING`, `RETURNING`, `FIRED`) are printed
-as `[Hub] ...`.
+Hub update rule:
 
-## Architecture Notes
-
-**Absolute-angle motor control (Hub).** Each `M` packet sets the target angle
-directly (no accumulation), reflecting the fixed-camera design:
-
-```
-pan_target  = clamp(pan_val  / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
-tilt_target = clamp((tilt_val + 100) / 200.0 * (TILT_MAX − TILT_MIN) + TILT_MIN,
-                    TILT_MIN, TILT_MAX)
+```python
+pan_target  = clamp(pan_target  - PAN_SIGN  * pan_err  * GAIN, PAN_MIN,  PAN_MAX)
+tilt_target = clamp(tilt_target - TILT_SIGN * tilt_err * GAIN, TILT_MIN, TILT_MAX)
 ```
 
-The Hub then calls `pan_motor.track_target()` / `tilt_motor.track_target()` every
-loop iteration (~5 ms wait).
+Hub replies with `rdy` after processed packets and also sends a periodic heartbeat
+every 200 ms to prevent deadlocks after a lost notification. Status lines such as
+`READY`, `ARMED`, `FIRING`, `RETURNING`, and `FIRED` are printed by the Mac as
+`[Hub] ...`.
+Shot angle snapshots are printed as `SHOT_START`, `SHOT_RELEASE`, and
+`SHOT_DONE`, including actual `pan_F`, `tilt_D`, `c_C` motor angles and the
+current pan/tilt targets.
 
-**C-motor fire state machine (reciprocating):**
+All Mac-side tools use `gesture_bt/pybricks_ble.py` for BLE scan, notification,
+readiness, stale-Hub warnings, and reconnect diagnostics.
 
+## Main Workflows
+
+### 1. Manual BLE and Motor Test
+
+Use this before camera work.
+
+```bash
+cd gesture_bt
+source .venv/bin/activate
+python bt_manual_motor_test.py --hub-name "Team5" --print-sends
 ```
-armed → firing (+C_FIRE_DC to C_FIRE_ANGLE°) → returning (−C_RETURN_DC to 0°) → armed
+
+Expected path:
+
+```text
+[SCAN] name='Team5' timeout=15.0s
+[BLE] connected to Team5
+[NOTIFY] started. Start the saved Hub program with the Hub center button if needed.
+[Hub] READY
+[Hub] ARMED
+[READY] first rdy received.
+Starting 4-byte BLE motor test...
+[SEND] M,100,0,0 -> b'M\x64\x00\x00'
+[SEND] M,0,0,1 -> b'M\x00\x00\x01'
+[Hub] SHOT_START pan_F=... tilt_D=... c_C=... target_pan=... target_tilt=...
+[Hub] FIRING
+[Hub] SHOT_RELEASE pan_F=... tilt_D=... c_C=... target_pan=... target_tilt=...
+[Hub] RETURNING
+[Hub] SHOT_DONE pan_F=... tilt_D=... c_C=... target_pan=... target_tilt=...
+[Hub] ARMED
+[Hub] FIRED
 ```
 
-**Safety timeout:** if no packet arrives within 1000 ms, the Hub re-centers
-pan/tilt targets.
+### 2. Hand Gesture Control
 
-**Emergency stop:** pressing any Hub button exits the loop; the Mac sends a zero
-packet on shutdown.
+```bash
+python gesture_bt_controller.py --hub-name "Team5" --print-sends
+```
 
-**BLE deadlock recovery:** the Hub sends a periodic `rdy` heartbeat every 200 ms
-even when idle, so a single dropped notification does not permanently stall the
-Mac's `asyncio.Event` wait.
+Behavior:
 
-## Motion Constants (Hub)
+| Input | Behavior |
+|-------|----------|
+| Palm visible | Pan/tilt follows hand offset from screen center |
+| Fist transition | Sends `fire=1` once |
+| No hand | Sends zero error after the no-hand delay |
+| `q` | Sends `STOP` and exits |
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `PAN_MIN` / `PAN_MAX` | −35 / 35° | Pan target travel limits |
-| `TILT_MIN` / `TILT_MAX` | 0 / 80° | Tilt target travel limits |
-| `PAN_SPEED` | 600 deg/s | Pan tracking speed |
-| `TILT_SPEED` | 500 deg/s | Tilt tracking speed |
-| `COMMAND_TIMEOUT_MS` | 1000 ms | Re-centers pan/tilt if no command received |
-| `C_FIRE_ANGLE` | 170° | C-motor fire (release) position |
-| `C_FIRE_DC` | 80 | Forward (fire) duty-cycle % |
-| `C_RETURN_DC` | 50 | Reverse (reload) duty-cycle % |
-| `C_TOLERANCE` | 3° | Angle tolerance for state transitions |
-| `LAUNCH_PWM_A` | 100 | Port A launcher-wheel PWM |
-| `LAUNCH_PWM_B` | −100 | Port B launcher-wheel PWM (opposite direction) |
+### 3. Balloon / Target Interception
+
+```bash
+python balloon_intercept.py --hub-name "Team5" --color-picker --print-sends
+```
+
+This is the preferred C-RAM demo path. It detects a colored target using HSV,
+predicts a future impact point with smoothed velocity and vertical acceleration,
+and fires after the predicted point remains within the lock threshold for the
+configured number of frames.
+
+Important options:
+
+| Option | Purpose |
+|--------|---------|
+| `--color-picker` | Click the target color in the camera window |
+| `--hsv-lower`, `--hsv-upper` | Run without the picker using a fixed HSV range |
+| `--flight-time` | Projectile travel time used by the parabolic predictor |
+| `--lead-frames` | Extra frame-based lead added on top of `--flight-time` |
+| `--velocity-smoothing` | EMA coefficient for target velocity |
+| `--accel-smoothing` | EMA coefficient for vertical acceleration |
+| `--fire-threshold` | Pixel error threshold for auto-fire |
+| `--hold-frames` | Consecutive lock frames required before fire |
+| `--mode rl` | Experimental Q-table correction layer |
+
+## Team & Roles
+
+Roles are now confirmed.
+
+| Member | Role | Focus |
+|--------|------|-------|
+| P1 | Hardware Engineer | Robot build, launcher mechanism, motor mounting, wiring |
+| P2 | HW/SW Integration | Hub firmware, BLE protocol, calibration bridge, fire timing |
+| P3 | Vision Engineer | HSV target detection robustness, target tracking, camera parameters |
+| P4 | Prediction / Algorithm | Lead-shot math, flight-time tuning, latency compensation |
+| P5 | Calibration & Test / Docs | Calibration procedure, evaluation harness, session ops, README/report |
+
+## Project Dashboard
+
+Status legend: Done = complete, Next = active priority, Planned = queued.
+
+| Module | Status | Owner |
+|--------|:------:|:-----:|
+| Pybricks BLE direct architecture selected | Done | P2 |
+| 4-byte packet protocol + `rdy` flow control | Done | P2 |
+| Hub parser self-recovery + stdin flush | Done | P2 |
+| Hub crash visibility (`ERR_*`, `FATAL`, `BTN_STOP`) | Done | P2 |
+| Manual BLE motor test | Done | P2 |
+| Hand gesture control over BLE | Done | P3/P2 |
+| Fist-triggered fire latch | Done | P3/P2 |
+| Balloon/target HSV interception with parabolic prediction | Done | P3/P4 |
+| Team role split and README dashboard | Done | P5 |
+| Camera-only / no-BLE mode for target interception | Next | P5 |
+| Camera-to-turret calibration routine | Next | P5/P2 |
+| Target robustness: area gates, continuity, lost-target recovery | Planned | P3 |
+| Flight-time and latency calibration | Planned | P4/P5 |
+| Evaluation logging: hit rate, error, session CSV | Planned | P5 |
+| Final report figures and protocol explanation | Planned | P5 |
+
+## To-Do Detail
+
+| # | Item | Owner | Why it matters | Device? |
+|:-:|------|:-----:|----------------|:-------:|
+| 1 | Camera-only / no-BLE mode | P5 | Lets P3/P4/P5 iterate on vision, prediction, and logging without occupying the single robot. | No |
+| 2 | Camera-to-turret calibration | P5/P2 | Current error-based steering works, but repeatable interception needs measured mapping and sign/gain confirmation. | Yes |
+| 3 | Target robustness | P3 | Reduces false locks and accidental shots under noisy lighting/backgrounds. | No |
+| 4 | Flight-time / latency calibration | P4/P5 | BLE, processing, and projectile delay determine the correct lead. | Yes |
+| 5 | Evaluation logging | P5 | Needed for final report evidence: hit/miss, prediction error, constants, and trial conditions. | Partial |
+| 6 | Final integration slots | All | Validate the full Hub + camera + target + launcher loop under demo conditions. | Yes |
+
+## Team Workflow With One Robot
+
+Device-free work should run in parallel. Device-dependent work should be booked
+in short slots.
+
+| Phase | Robot slot | Parallel work without robot |
+|-------|------------|-----------------------------|
+| 1. Bring-up | P1/P2 run wiring, Hub upload, `bt_manual_motor_test.py` | P3 tunes HSV, P4 tests prediction on clips, P5 updates docs |
+| 2. Calibration | P2/P5 tune signs, gains, and target thresholds | P3 improves detection, P4 computes lead/latency model |
+| 3. Integration | All run scheduled end-to-end trials | P5 logs results, P3/P4 tune from recorded data |
+| 4. Report/demo | Short final demo rehearsal | P5 prepares README/report figures and final demo notes |
+
+## Troubleshooting
+
+| Symptom | Likely cause | Action |
+|---------|--------------|--------|
+| `[SCAN] no matching Hub` | Pybricks Code/SPIKE app still connected, Hub off, or wrong name | Disconnect apps, power-cycle Hub, retry; UUID fallback runs after name miss |
+| `[BLE] connected` but no `[READY]` | Saved Hub program not running | Press Hub center button; confirm Hub display shows `BT` |
+| `[WAIT] Hub program is not sending rdy` | Hub has not sent readiness heartbeat | Press Hub center button, disconnect Pybricks Code/SPIKE app, confirm display shows `BT` |
+| `[STALE] Hub is silent` | BLE link alive but Hub program stopped/crashed | Restart Hub program and check `[Hub] FATAL...` output |
+| `[DISCONNECT]` / `[RECONNECT]` | BLE link dropped | Keep Hub nearby and powered; default tools rescan every 3 seconds unless `--no-reconnect` is used |
+| Motor moves opposite direction | Sign mismatch | Flip `PAN_SIGN` or `TILT_SIGN` in Hub code |
+| Motor barely moves | Gain too low | Increase `GAIN` in Hub code carefully |
+| Camera cannot open on macOS | Camera permission missing | Grant Terminal/iTerm/VS Code camera access |
+
+## Verified As Of 2026-06-02
+
+- GitHub remote: `orca-svg/CS270_FinalProject`, default branch `main`.
+- Current direction: Pybricks BLE direct control.
+- Shared repo boundary: `gesture_bt/`, `docs/`, `README.md`, and
+  `README.ko.md`.
+- Local-only/generated files are ignored: harness files, virtual environments,
+  zip archives, local copies, and MediaPipe `.task` model files.
+- Python syntax check passes for the tracked `gesture_bt/*.py` runtime files.
