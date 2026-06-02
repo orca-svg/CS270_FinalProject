@@ -31,8 +31,12 @@ pip install -r requirements_gesture_bt.txt
 `hub_pybricks_gesture_server.py`, save it on the Hub, and disconnect Pybricks
 Code/SPIKE App before running the Mac script. The Mac-side tools send a
 Pybricks remote `START` command automatically, using the Team5 connection path
-verified on 2026-06-03. Use `--no-auto-start` only if you want to start the
-Hub program manually with the center button.
+verified on 2026-06-03. If the Hub program stops mid-session, the Mac re-sends
+`START` and re-syncs on the next `rdy`, so the run recovers without a restart.
+BLE connection is retried automatically (`--connect-attempts`, default 3); raise
+`--connect-attempts`/`--connect-timeout` if the first scan is flaky. Use
+`--no-auto-start` only if you want to start the Hub program manually with the
+center button.
 
 ## 🧭 Which script do I run?
 
@@ -180,6 +184,9 @@ center lock window.
 | `--send-interval` | Minimum BLE command interval |
 | `--camera`, `--width`, `--height` | Camera index and frame size |
 | `--no-auto-start` | Disable Mac-side remote START |
+| `--connect-timeout` | BLE connect timeout in seconds (default `45`) |
+| `--connect-attempts` | BLE scan/connect retries before giving up (default `3`) |
+| `--keep-hub-running` | Leave the Hub program running after the camera script exits (default sends `STOP` so the Hub is ready to re-run) |
 
 ---
 
@@ -248,6 +255,8 @@ Run device-free work in parallel; book the single robot in short slots.
 |---------|--------------|--------|
 | `[SCAN] no matching Hub` | App still connected, Hub off, or wrong name | Disconnect Pybricks Code/SPIKE app, power-cycle Hub, retry (UUID fallback runs after a name miss) |
 | Repeating `STOPPED` status after connect | Saved Hub program is not running | Default scripts send remote `START` automatically; verify `[START] sent remote START command to Hub.` appears |
+| Hub stops mid-run, then resumes | Hub program ended; Mac auto-recovered | Expected: Mac re-sends `START` (`[RECOVER] ... sending remote START`) and continues on the next `rdy` |
+| First connect fails, second succeeds | BLE scan/connect is flaky on first try | Expected with default 3 retries; raise `--connect-attempts`/`--connect-timeout` if it persists |
 | `[BLE] connected` but no `[READY]` | Hub program did not send `rdy` | Keep `--auto-start` enabled, disconnect Pybricks Code/SPIKE App, power-cycle Hub, retry |
 | `[WAIT] Hub not sending rdy` | No readiness heartbeat yet | Retry with `--debug-rx`; use `--no-auto-start` only for manual center-button diagnostics |
 | `[STALE] Hub is silent` | Link alive but Hub program stopped/crashed | Restart Hub program; check `[Hub] FATAL...` output |

@@ -1,5 +1,5 @@
 # LEGO SPIKE Prime Hub + Pybricks BLE stdin/stdout bridge.
-# Save this file on the Hub, then start it with the Hub CENTER button.
+# Save this file on the Hub. Mac-side tools can start it remotely over BLE.
 
 from pybricks.hubs import PrimeHub
 from pybricks.pupdevices import Motor
@@ -48,6 +48,7 @@ C_TOLERANCE = 3
 
 LAUNCH_PWM_A = 100
 LAUNCH_PWM_B = -100
+SPIN_LAUNCH_ON_START = False
 
 keyboard = poll()
 keyboard.register(stdin)
@@ -75,6 +76,15 @@ def stop_all():
                 pass
 
 
+def motor_angle(motor):
+    if motor is None:
+        return "NA"
+    try:
+        return str(motor.angle())
+    except Exception:
+        return "ERR"
+
+
 def start_launcher_wheels():
     if launch_l:
         launch_l.dc(LAUNCH_PWM_A)
@@ -94,6 +104,7 @@ def c_update(can_fire):
 
     if c_state == "armed":
         if can_fire:
+            start_launcher_wheels()
             c_motor.dc(C_FIRE_DC)
             c_state = "firing"
             write_line("FIRING")
@@ -105,6 +116,11 @@ def c_update(can_fire):
     elif c_state == "returning":
         if now <= C_TOLERANCE:
             c_motor.stop()
+            if not SPIN_LAUNCH_ON_START:
+                if launch_l:
+                    launch_l.stop()
+                if launch_r:
+                    launch_r.stop()
             c_state = "armed"
             write_line("ARMED")
             return True
@@ -122,7 +138,8 @@ def main():
     if c_motor:
         c_motor.reset_angle(0)
 
-    start_launcher_wheels()
+    if SPIN_LAUNCH_ON_START:
+        start_launcher_wheels()
     hub.display.text("BT")
     write_line("READY")
     write_line("ARMED")
@@ -160,6 +177,20 @@ def main():
                     if fire == 1:
                         can_fire = True
                     last_cmd_ms = watch.time()
+                    write_line(
+                        "CMD pan_val="
+                        + str(pan_val)
+                        + " tilt_val="
+                        + str(tilt_val)
+                        + " pan_target="
+                        + str(int(pan_target))
+                        + " tilt_target="
+                        + str(int(tilt_target))
+                        + " pan_angle="
+                        + motor_angle(pan_motor)
+                        + " tilt_angle="
+                        + motor_angle(tilt_motor)
+                    )
                 elif opcode == ord("S"):
                     running = False
             try:
@@ -193,9 +224,6 @@ def main():
         if watch.time() - last_cmd_ms > COMMAND_TIMEOUT_MS:
             pan_target = 0.0
             tilt_target = 0.0
-
-        if hub.buttons.pressed():
-            running = False
 
         wait(5)
 

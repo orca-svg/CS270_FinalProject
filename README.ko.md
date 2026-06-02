@@ -30,8 +30,11 @@ pip install -r requirements_gesture_bt.txt
 **그다음:** [Pybricks Code](https://code.pybricks.com)에서
 `hub_pybricks_gesture_server.py`를 Hub에 저장하고, Mac 스크립트를 실행하기 전
 Pybricks Code/SPIKE App 연결을 해제한다. Mac 측 도구는 2026-06-03 Team5에서
-검증한 방식대로 Pybricks 원격 `START`만 자동 전송한다. Hub 중앙 버튼으로 직접
-시작하고 싶을 때만 `--no-auto-start`를 사용한다.
+검증한 방식대로 Pybricks 원격 `START`만 자동 전송한다. 실행 도중 Hub 프로그램이
+멈추면 Mac이 `START`를 다시 보내고 다음 `rdy`에 재동기화하므로 재시작 없이 복구된다.
+BLE 연결은 자동 재시도된다(`--connect-attempts`, 기본 3). 첫 스캔이 불안정하면
+`--connect-attempts`/`--connect-timeout`를 올린다. Hub 중앙 버튼으로 직접 시작하고
+싶을 때만 `--no-auto-start`를 사용한다.
 
 ## 🧭 어떤 스크립트를 실행하나?
 
@@ -176,6 +179,9 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 | `--send-interval` | BLE 명령 최소 전송 간격 |
 | `--camera`, `--width`, `--height` | 카메라 인덱스와 프레임 크기 |
 | `--no-auto-start` | Mac 측 원격 START 비활성화 |
+| `--connect-timeout` | BLE 연결 타임아웃(초, 기본 `45`) |
+| `--connect-attempts` | 포기 전 BLE 스캔/연결 재시도 횟수(기본 `3`) |
+| `--keep-hub-running` | 카메라 스크립트 종료 후에도 Hub 프로그램 유지(기본은 `STOP` 전송으로 재실행 준비) |
 
 ---
 
@@ -244,6 +250,8 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 |------|----------|------|
 | `[SCAN] no matching Hub` | 앱이 점유 중, Hub 꺼짐, 이름 불일치 | Pybricks Code/SPIKE 앱 연결 해제, Hub 재부팅, 재시도 (이름 실패 후 UUID fallback 실행) |
 | 연결 후 `STOPPED` 반복 | 저장된 Hub 프로그램 미실행 | 기본 스크립트는 원격 `START`를 자동 전송한다. `[START] sent remote START command to Hub.` 로그 확인 |
+| 실행 도중 멈췄다가 다시 진행 | Hub 프로그램 종료 후 Mac이 자동 복구 | 정상 동작: Mac이 `START` 재전송(`[RECOVER] ... sending remote START`) 후 다음 `rdy`에 재개 |
+| 첫 연결 실패, 두 번째 성공 | 첫 시도에서 BLE 스캔/연결 불안정 | 기본 3회 재시도로 예상되는 동작. 계속되면 `--connect-attempts`/`--connect-timeout` 상향 |
 | `[BLE] connected`인데 `[READY]` 없음 | Hub 프로그램이 `rdy`를 보내지 않음 | `--auto-start` 기본값 유지, Pybricks Code/SPIKE App 연결 해제, Hub 재부팅 후 재시도 |
 | `[WAIT] Hub not sending rdy` | readiness 하트비트 아직 없음 | `--debug-rx`로 재시도. 수동 중앙 버튼 진단 때만 `--no-auto-start` 사용 |
 | `[STALE] Hub is silent` | 링크는 살아있으나 Hub 프로그램 정지/크래시 | Hub 프로그램 재시작; `[Hub] FATAL...` 확인 |

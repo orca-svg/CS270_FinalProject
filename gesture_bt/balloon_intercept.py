@@ -59,6 +59,8 @@ async def run_shooter(args: argparse.Namespace) -> None:
     sender = PybricksBleSender(
         args.hub_name,
         scan_timeout=args.scan_timeout,
+        connect_timeout=args.connect_timeout,
+        connect_attempts=args.connect_attempts,
         reconnect=not args.no_reconnect,
         stale_timeout=args.stale_timeout,
         auto_start=not args.no_auto_start,
@@ -172,17 +174,20 @@ async def run_shooter(args: argparse.Namespace) -> None:
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()
-        await sender.close(send_stop=False)
+        await sender.close(send_stop=not args.keep_hub_running)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hub-name", default="Team5")
     parser.add_argument("--scan-timeout", type=float, default=15.0)
+    parser.add_argument("--connect-timeout", type=float, default=45.0)
+    parser.add_argument("--connect-attempts", type=int, default=3)
     parser.add_argument("--ready-timeout", type=float, default=30.0)
     parser.add_argument("--stale-timeout", type=float, default=2.0)
     parser.add_argument("--no-reconnect", action="store_true")
     parser.add_argument("--no-auto-start", action="store_true", help="Disable remote START and require Hub CENTER start.")
+    parser.add_argument("--keep-hub-running", action="store_true", help="Leave the Hub program running after the camera program exits.")
     parser.add_argument("--print-sends", action="store_true")
     parser.add_argument("--debug-rx", action="store_true")
     parser.add_argument("--camera", type=int, default=0)

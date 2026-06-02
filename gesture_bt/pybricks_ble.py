@@ -55,17 +55,25 @@ class PybricksBleSender:
         hub_name: str,
         scan_timeout: float = 15.0,
         *,
+        connect_timeout: float = 45.0,
+        connect_attempts: int = 3,
+        connect_retry_delay: float = 2.0,
         reconnect: bool = True,
         stale_timeout: float = 2.0,
         auto_start: bool = True,
         allow_open_loop: bool = False,
+        restart_on_stop: bool = True,
     ):
         self.hub_name = hub_name
         self.scan_timeout = scan_timeout
+        self.connect_timeout = connect_timeout
+        self.connect_attempts = max(1, int(connect_attempts))
+        self.connect_retry_delay = connect_retry_delay
         self.reconnect = reconnect
         self.stale_timeout = stale_timeout
         self.auto_start = auto_start
         self.allow_open_loop = allow_open_loop
+        self.restart_on_stop = restart_on_stop
 
         self.client = None
         self.ready = asyncio.Event()
@@ -87,6 +95,8 @@ class PybricksBleSender:
         self._stale_warned = False
         self._closing = False
         self._loop = None
+        self._last_start_attempt = 0.0
+        self._start_cooldown = 1.5
 
     async def _find_device(self):
         print(f"[SCAN] name='{self.hub_name}' timeout={self.scan_timeout:.1f}s")
@@ -128,13 +138,31 @@ class PybricksBleSender:
 
     async def connect(self) -> None:
         self._closing = False
-        device = await self._find_device()
-        if not device:
-            raise RuntimeError(
-                f"Could not find '{self.hub_name}' and no Pybricks Hub found nearby. "
-                "Disconnect Pybricks Code/SPIKE app, turn the Hub on, and try again."
-            )
-        await self._do_connect(device)
+        last_error = None
+        for attempt in range(1, self.connect_attempts + 1):
+            if attempt > 1:
+                print(f"[BLE] reconnecting scan attempt {attempt}/{self.connect_attempts}")
+
+            device = await self._find_device()
+            if not device:
+                last_error = RuntimeError(
+                    f"Could not find '{self.hub_name}' and no Pybricks Hub found nearby."
+                )
+            else:
+                try:
+                    await self._do_connect(device)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    print(f"[BLE] connect attempt {attempt}/{self.connect_attempts} failed: {exc}")
+
+            if attempt < self.connect_attempts:
+                await asyncio.sleep(self.connect_retry_delay)
+
+        raise RuntimeError(
+            f"Could not connect to '{self.hub_name}'. Disconnect Pybricks Code/SPIKE app, "
+            "power-cycle the Hub, and try again."
+        ) from last_error
 
     async def _do_connect(self, device) -> None:
         self._loop = asyncio.get_running_loop()
@@ -146,10 +174,22 @@ class PybricksBleSender:
             if self.reconnect and not self._closing and not self._reconnecting and self._loop and self._loop.is_running():
                 self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect_loop()))
 
-        self.client = BleakClient(device, disconnected_callback=handle_disconnect)
-        await self.client.connect()
+        self.client = BleakClient(device, disconnected_callback=handle_disconnect, timeout=self.connect_timeout)
+        try:
+            await self.client.connect()
+        except Exception:
+            failed_client = self.client
+            with contextlib.suppress(Exception):
+                await failed_client.disconnect()
+            self.client = None
+            self.connected = False
+            self.ready.clear()
+            raise
         self._rx_text_buffer = ""
         self.ready.clear()
+        self._program_running = None
+        self._stdout_seen = False
+        self._open_loop = False
         self._stale_warned = False
         self.connected = True
         self._connect_time = time.time()
@@ -170,6 +210,10 @@ class PybricksBleSender:
         if not self.client or not self.connected:
             return
         try:
+            self._last_start_attempt = time.time()
+            self.ready.clear()
+            self._stdout_seen = False
+            self._open_loop = False
             await self.client.write_gatt_char(
                 PYBRICKS_COMMAND_EVENT_CHAR_UUID,
                 bytes([PYBRICKS_CMD_START_USER_PROGRAM]),
@@ -224,6 +268,8 @@ class PybricksBleSender:
                     self._running_event.set()
                 else:
                     self._running_event.clear()
+                    self.ready.clear()
+                    self._stdout_seen = False
                     self._open_loop = False
             self.last_rx = time.time()
             return
@@ -252,6 +298,28 @@ class PybricksBleSender:
             if line:
                 print(f"[Hub] {line}")
 
+    async def resume_if_stopped(self, timeout: float = 4.0) -> bool:
+        if self._program_running is not False:
+            return True
+        if not self.auto_start or not self.restart_on_stop:
+            return False
+
+        now = time.time()
+        wait_for_cooldown = self._start_cooldown - (now - self._last_start_attempt)
+        if wait_for_cooldown > 0:
+            await asyncio.sleep(wait_for_cooldown)
+
+        print("[RECOVER] Hub user program is STOPPED; sending remote START.")
+        await self._start_user_program()
+
+        try:
+            await asyncio.wait_for(self.ready.wait(), timeout=timeout)
+            print("[RECOVER] rdy received after restart.")
+            return True
+        except asyncio.TimeoutError:
+            print("[RECOVER] remote START sent, but no rdy arrived yet.")
+            return False
+
     async def wait_until_ready(self, timeout: float = 30.0) -> bool:
         """Wait for the Hub program to send stdout rdy.
 
@@ -264,9 +332,12 @@ class PybricksBleSender:
         deadline = start + timeout
         running_seen_at: Optional[float] = None
 
-        print("[ACTION] Start the saved Hub program with CENTER, preferably BEFORE running this script.")
-        print("[ACTION] If the Hub stays STOPPED while BLE is connected, stop this script,")
-        print("[ACTION] power-cycle the Hub, press CENTER first, then run the script again.")
+        if self.auto_start:
+            print("[ACTION] Mac will remote-start the saved Hub program if it is STOPPED.")
+            print("[ACTION] Keep Pybricks Code/SPIKE app disconnected while this script is running.")
+        else:
+            print("[ACTION] Start the saved Hub program with CENTER before running this script.")
+            print("[ACTION] If the Hub stays STOPPED, power-cycle it and press CENTER first.")
 
         while loop.time() < deadline:
             if self.ready.is_set():
@@ -297,11 +368,11 @@ class PybricksBleSender:
 
         if self._program_running:
             print("[WAIT] Hub status = RUNNING but stdout/rdy did not arrive before timeout.")
-            print("[WAIT] Do not send stdin yet; power-cycle the Hub, press CENTER first, then run the Mac script.")
+            print("[WAIT] Do not send stdin yet; power-cycle the Hub and retry.")
         else:
             print(
-                "[WAIT] The Hub program did not start. Power-cycle the hub, press CENTER to start it BEFORE running this script, "
-                "and confirm Pybricks Code/SPIKE app is disconnected. Use --auto-start or --allow-open-loop only for diagnostics."
+                "[WAIT] The Hub program did not start. Confirm Pybricks Code/SPIKE app is disconnected, "
+                "power-cycle the Hub, and retry. Use --no-auto-start only for manual CENTER diagnostics."
             )
         return False
 
@@ -312,8 +383,9 @@ class PybricksBleSender:
 
         command_name = command.strip().upper()
         if self._program_running is False and command_name != "STOP":
-            print(f"[STATUS] Hub user program is STOPPED; skipped {command.strip()!r}")
-            return False
+            if not await self.resume_if_stopped(timeout=max(2.0, timeout)):
+                print(f"[STATUS] Hub user program is STOPPED; skipped {command.strip()!r}")
+                return False
 
         if not self._open_loop:
             try:
@@ -374,7 +446,7 @@ class PybricksBleSender:
             return
         if send_stop and self.connected:
             with contextlib.suppress(Exception):
-                await self.send("STOP", timeout=0.2)
+                await self.send("STOP", timeout=1.0)
         with contextlib.suppress(Exception):
             await self.client.disconnect()
 

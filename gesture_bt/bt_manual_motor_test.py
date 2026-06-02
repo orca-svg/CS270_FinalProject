@@ -21,6 +21,8 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hub-name", default="Team5")
     parser.add_argument("--scan-timeout", type=float, default=15.0)
+    parser.add_argument("--connect-timeout", type=float, default=45.0)
+    parser.add_argument("--connect-attempts", type=int, default=3)
     parser.add_argument("--ready-timeout", type=float, default=30.0)
     parser.add_argument("--stale-timeout", type=float, default=2.0)
     parser.add_argument("--no-reconnect", action="store_true", help="Do not rescan after BLE disconnect.")
@@ -50,6 +52,8 @@ async def main() -> None:
     hub = PybricksBleSender(
         args.hub_name,
         args.scan_timeout,
+        connect_timeout=args.connect_timeout,
+        connect_attempts=args.connect_attempts,
         reconnect=not args.no_reconnect,
         stale_timeout=args.stale_timeout,
         auto_start=args.auto_start,
