@@ -42,15 +42,15 @@ tilt_motor = safe_motor(Port.D, "D_TILT")
 pan_motor  = safe_motor(Port.F, "F_PAN")
 
 # --- motion constants (tune these if directions/ranges are wrong) ---
-PAN_SIGN   = 1      # flip to -1 if pan moves opposite direction
-TILT_SIGN  = 1      # flip to -1 if tilt moves opposite direction
+# 웹캠은 포탑과 독립. Mac이 픽셀 좌표를 절대 각도로 직접 변환하여 전송한다.
+# Pan  byte: [-100, +100] → [PAN_MIN, PAN_MAX]
+# Tilt byte: [-100, +100] → [TILT_MIN, TILT_MAX]  (-100=TILT_MIN, +100=TILT_MAX)
 PAN_MIN    = -35    # degrees
 PAN_MAX    =  35
 TILT_MIN   =   0
 TILT_MAX   =  80
 PAN_SPEED  = 600    # deg/s for track_target
 TILT_SPEED = 500
-GAIN       = 0.05   # degrees of target change per 1 unit of error
 COMMAND_TIMEOUT_MS = 1000
 RDY_INTERVAL_MS   = 200  # rdy를 못 받은 Mac을 복구하기 위한 주기적 재전송 간격
 
@@ -178,11 +178,17 @@ def main():
             if data and len(data) == 4:
                 opcode = data[0]
                 if opcode == ord("M"):
-                    pan_err  = i8(data[1])
-                    tilt_err = i8(data[2])
+                    pan_val  = i8(data[1])   # -100..+100
+                    tilt_val = i8(data[2])   # -100..+100
                     fire     = data[3]
-                    pan_target  = clamp(pan_target  - PAN_SIGN  * pan_err  * GAIN, PAN_MIN,  PAN_MAX)
-                    tilt_target = clamp(tilt_target - TILT_SIGN * tilt_err * GAIN, TILT_MIN, TILT_MAX)
+                    # 절대 각도 직접 설정 (고정 카메라 → 독립 모터 구조)
+                    # pan_val: -100 → PAN_MIN(-35°), +100 → PAN_MAX(+35°)
+                    pan_target  = clamp(pan_val  / 100.0 * PAN_MAX,
+                                        PAN_MIN, PAN_MAX)
+                    # tilt_val: -100 → TILT_MIN(0°), +100 → TILT_MAX(80°)
+                    tilt_target = clamp(
+                        (tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
+                        TILT_MIN, TILT_MAX)
                     if fire == 1:
                         can_fire = True   # latch until shot fires
                     last_cmd_ms = watch.time()
