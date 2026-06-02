@@ -28,8 +28,10 @@ pip install -r requirements_gesture_bt.txt
 ```
 
 **그다음:** [Pybricks Code](https://code.pybricks.com)에서
-`hub_pybricks_gesture_server.py`를 업로드하고 1회 실행 후 연결을 해제한다.
-Mac이 BLE로 연결되면 Hub 중앙 버튼을 눌러 저장된 프로그램을 시작한다.
+`hub_pybricks_gesture_server.py`를 Hub에 저장하고, Mac 스크립트를 실행하기 전
+Pybricks Code/SPIKE App 연결을 해제한다. Mac 측 도구는 2026-06-03 Team5에서
+검증한 방식대로 Pybricks 원격 `START`만 자동 전송한다. Hub 중앙 버튼으로 직접
+시작하고 싶을 때만 `--no-auto-start`를 사용한다.
 
 ## 🧭 어떤 스크립트를 실행하나?
 
@@ -38,8 +40,8 @@ Mac 측 진입점은 3개이며, 모두 `pybricks_ble.py`로 BLE를 공유한다
 | 스크립트 | 용도 | 로봇 필요? |
 |---------|------|:---------:|
 | **`bt_manual_motor_test.py`** | 카메라 없이 BLE + 모터 배선 검증. **가장 먼저 실행.** | ✅ 예 |
-| **`gesture_bt_controller.py`** | 손 제스처 제어(MediaPipe): 손바닥 조준, 주먹 발사. | `--dry-run` → 아니오 |
-| **`balloon_intercept.py`** | C-RAM 데모: HSV 표적 탐지 + 포물선 리드샷 + 자동 발사. | `--dry-run` → 아니오 |
+| **`gesture_bt_controller.py`** | 손 제스처 제어(MediaPipe): 손바닥 조준, 주먹 발사. | ✅ 예 |
+| **`balloon_intercept.py`** | C-RAM 데모: 빨간 표적 탐지 + 포물선 리드샷 + 자동 발사. | ✅ 예 |
 
 ```bash
 # 1) 배선 확인 (로봇 필요)
@@ -49,12 +51,12 @@ python bt_manual_motor_test.py --hub-name "Team5" --print-sends
 python gesture_bt_controller.py --hub-name "Team5" --print-sends
 
 # 3) 풍선 / 표적 요격  (데모 주력)
-python balloon_intercept.py --hub-name "Team5" --color-picker --print-sends
+python balloon_intercept.py --hub-name "Team5" --print-sends
 ```
 
-> 💡 **로봇이 없으면 `--dry-run`을 쓴다.** `gesture_bt_controller.py`와
-> `balloon_intercept.py` 모두 카메라/비전/예측 루프를 전부 실행하고 BLE 전송 대신
-> 패킷을 출력한다 — 단일 Hub를 점유하지 않고도 비전·예측 작업을 병렬로 진행할 수 있다.
+> 현재 업로드 경로는 실제 로봇에서 검증된 실행 경로다. Hub 전원을 켜고
+> Pybricks Code/SPIKE App 연결을 끊은 뒤, Mac 스크립트가 저장된 Hub 프로그램을
+> 자동 시작하게 둔다.
 
 ---
 
@@ -104,17 +106,17 @@ Mac은 Pybricks command/event characteristic에 선행 `0x06`을 붙여 쓴다. 
 | 2 | `tilt_err_i8` | signed tilt 오차 `[-100, 100]`, `value & 0xFF`로 인코딩 |
 | 3 | `fire` | `1`이면 발사 1회 래치, 평소 `0` |
 
-Hub는 오차를 목표 각도로 **누적**한다 (원시 속도를 명령하지 않음):
+현재 Hub runner는 signed 명령값을 절대 목표 각도로 직접 변환한다:
 
 ```python
-pan_target  = clamp(pan_target  - PAN_SIGN  * pan_err  * GAIN, PAN_MIN,  PAN_MAX)
-tilt_target = clamp(tilt_target - TILT_SIGN * tilt_err * GAIN, TILT_MIN, TILT_MAX)
+pan_target  = clamp(pan_val / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
+tilt_target = clamp((tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
+                    TILT_MIN, TILT_MAX)
 ```
 
 Hub는 패킷마다 `rdy`를 보내고(유실 notification 대비 200 ms 하트비트 포함),
 Mac이 `[Hub] ...`로 출력하는 상태 라인을 전송한다: `READY`, `ARMED`, `FIRING`,
-`RETURNING`, `FIRED`, 그리고 발사 스냅샷 `SHOT_START / SHOT_RELEASE / SHOT_DONE`
-(실시간 `pan_F`, `tilt_D`, `c_C` 각도 포함).
+`RETURNING`, `FIRED`.
 
 > 📖 상세: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
@@ -136,12 +138,12 @@ python bt_manual_motor_test.py --hub-name "Team5" --print-sends
 ```text
 [SCAN] name='Team5' timeout=15.0s
 [BLE] connected to Team5
-[Hub] READY
-[Hub] ARMED
-[READY] first rdy received.
+[START] sent remote START command to Hub.
+[STATUS] Hub user program: RUNNING
+[READY] rdy received.
 [SEND] M,100,0,0 -> b'M\x64\x00\x00'
 [SEND] M,0,0,1   -> b'M\x00\x00\x01'
-[Hub] SHOT_START ... → FIRING → SHOT_RELEASE → RETURNING → SHOT_DONE → ARMED → FIRED
+[Hub] FIRING → RETURNING → ARMED → FIRED
 ```
 
 ### 2. 손 제스처 제어
@@ -160,23 +162,20 @@ python gesture_bt_controller.py --hub-name "Team5" --print-sends
 ### 3. 풍선 / 표적 요격 (데모 주력)
 
 ```bash
-python balloon_intercept.py --hub-name "Team5" --color-picker --print-sends
+python balloon_intercept.py --hub-name "Team5" --print-sends
 ```
 
-HSV로 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가속도로 미래 탄착점을
-예측하며, 예측점이 `--hold-frames` 동안 조준 임계 내에 머무르면 자동 발사한다.
+HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가속도로 미래
+탄착점을 예측하며, 예측점이 화면 중심 lock window에 들어오면 자동 발사한다.
 
 | 옵션 | 목적 |
 |------|------|
-| `--color-picker` | 카메라 창에서 표적 색상 클릭 |
-| `--hsv-lower`, `--hsv-upper` | 고정 HSV 범위 (피커 생략) |
 | `--flight-time` | 포물선 예측에 쓰는 발사체 도달 예상 시간 |
-| `--lead-frames` | `--flight-time`에 더할 프레임 기반 리드 보정 |
-| `--velocity-smoothing` / `--accel-smoothing` | EMA 계수 (속도 / 수직 가속도) |
-| `--fire-threshold` | 자동 발사 허용 픽셀 오차 |
-| `--hold-frames` | 발사 전 연속 조준 프레임 수 |
-| `--fire-cooldown` | 발사 후 재발사 금지 시간(초) |
-| `--mode rl` | 실험적 Q-table 보정 레이어 (`--qtable`) |
+| `--fire-px` | 화면 중심 lock window 픽셀 크기 |
+| `--min-area` | 빨간 contour 최소 면적 |
+| `--send-interval` | BLE 명령 최소 전송 간격 |
+| `--camera`, `--width`, `--height` | 카메라 인덱스와 프레임 크기 |
+| `--no-auto-start` | Mac 측 원격 START 비활성화 |
 
 ---
 
@@ -203,7 +202,7 @@ HSV로 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가
 | 수동 BLE 모터 테스트 | ✅ | P2 |
 | 손 제스처 제어 + 주먹 발사 래치 | ✅ | P3 · P2 |
 | 풍선/표적 HSV 요격 + 포물선 예측 | ✅ | P3 · P4 |
-| `--dry-run` 카메라 전용 모드 (로봇 불필요) | ✅ | P3 · P5 |
+| Mac 측 원격 START + `rdy` 흐름 제어 | ✅ | P2 |
 | 팀 역할 + README 대시보드 + 문서 | ✅ | P5 |
 | 카메라-포탑 캘리브레이션 루틴 | 🔜 | P5 · P2 |
 | 결정적 녹화 영상 리플레이 하네스 | 🔜 | P5 |
@@ -217,7 +216,7 @@ HSV로 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가
 | # | 항목 | 담당 | 중요한 이유 | 기기? |
 |:-:|------|:----:|------------|:----:|
 | 1 | **카메라-포탑 캘리브레이션** | P5 · P2 | 오차 기반 조향은 동작하지만, 반복 가능한 요격에는 측정 기반 픽셀→각도 mapping과 sign/gain 확인이 필요하다. 정확도를 가장 크게 좌우한다. | 🔴 예 |
-| 2 | **녹화 영상 리플레이 하네스** | P5 | `--dry-run`은 이미 로봇 없이 라이브 실행을 지원한다. 결정적 클립 리플레이 모드를 추가하면 P3/P4가 동일 입력에서 감지/예측 변경을 비교할 수 있다. | 🟢 아니오 |
+| 2 | **녹화 영상 리플레이 하네스** | P5 | 결정적 클립 리플레이 모드를 추가하면 P3/P4가 동일 입력에서 감지/예측 변경을 비교할 수 있다. | 🟢 아니오 |
 | 3 | **표적 강건성** | P3 | 최소/최대 면적 게이팅, 프레임 간 연속성, 소실 복구로 false lock과 오발을 줄인다. | 🟢 아니오 |
 | 4 | **체공 시간 / 지연 캘리브레이션** | P4 · P5 | BLE + 처리 + 발사체 지연이 올바른 리드를 결정한다. 측정하여 예측기에 반영한다. | 🔴 예 |
 | 5 | **평가 로깅** | P5 | 명중/실패, 예측 오차, 실험 조건을 CSV로 — 최종 보고서 근거. | 🟡 부분 |
@@ -229,13 +228,13 @@ HSV로 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가
 
 | 단계 | 🔴 로봇 슬롯 | 🟢 로봇 없이 병렬 진행 |
 |------|------------|---------------------|
-| **1. 구동** | P1/P2: 배선, Hub 업로드, `bt_manual_motor_test.py` | P3 HSV 튜닝(`--dry-run`), P4 영상 기반 예측, P5 문서 |
+| **1. 구동** | P1/P2: 배선, Hub 업로드, `bt_manual_motor_test.py` | P3 HSV 튜닝, P4 영상 기반 예측, P5 문서 |
 | **2. 캘리브레이션** | P2/P5: sign, gain, threshold | P3 감지 강건성, P4 리드/지연 모델 |
 | **3. 통합** | 전원: 예약된 end-to-end 테스트 | P5 결과 로깅, P3/P4 녹화 데이터 기반 튜닝 |
 | **4. 보고서/데모** | 최종 리허설 | P5 README/보고서 그림 + 데모 설명 정리 |
 
-> 💡 `--dry-run`이 있으므로 **5명 중 3명은 언제든 로봇 없이 진척을 낼 수 있다.**
-> 로봇 슬롯은 배선, 캘리브레이션, 실사격에 집중 배정하라.
+> 💡 로봇 슬롯은 배선, 캘리브레이션, 실사격에 집중 배정하라. 비전/예측 변경은
+> 가능한 한 저장된 카메라 클립 기준으로 개발한다.
 
 ---
 
@@ -244,16 +243,17 @@ HSV로 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가
 | 증상 | 가능 원인 | 조치 |
 |------|----------|------|
 | `[SCAN] no matching Hub` | 앱이 점유 중, Hub 꺼짐, 이름 불일치 | Pybricks Code/SPIKE 앱 연결 해제, Hub 재부팅, 재시도 (이름 실패 후 UUID fallback 실행) |
-| `[BLE] connected`인데 `[READY]` 없음 | 저장된 Hub 프로그램 미실행 | Hub 중앙 버튼; 화면 `BT` 확인 |
-| `[WAIT] Hub not sending rdy` | readiness 하트비트 아직 없음 | 중앙 버튼, 다른 앱 연결 해제, 화면 `BT` 확인 |
+| 연결 후 `STOPPED` 반복 | 저장된 Hub 프로그램 미실행 | 기본 스크립트는 원격 `START`를 자동 전송한다. `[START] sent remote START command to Hub.` 로그 확인 |
+| `[BLE] connected`인데 `[READY]` 없음 | Hub 프로그램이 `rdy`를 보내지 않음 | `--auto-start` 기본값 유지, Pybricks Code/SPIKE App 연결 해제, Hub 재부팅 후 재시도 |
+| `[WAIT] Hub not sending rdy` | readiness 하트비트 아직 없음 | `--debug-rx`로 재시도. 수동 중앙 버튼 진단 때만 `--no-auto-start` 사용 |
 | `[STALE] Hub is silent` | 링크는 살아있으나 Hub 프로그램 정지/크래시 | Hub 프로그램 재시작; `[Hub] FATAL...` 확인 |
 | `[DISCONNECT]` / `[RECONNECT]` | BLE 링크 끊김 | Hub를 가까이·전원 유지; `--no-reconnect`가 아니면 3초마다 재스캔 |
-| 모터가 반대로 움직임 | 부호 불일치 | Hub 코드의 `PAN_SIGN` / `TILT_SIGN` 반전 |
-| 모터가 거의 안 움직임 | gain 과소 | Hub 코드의 `GAIN`을 신중히 증가 |
+| 모터가 반대쪽을 가리킴 | 카메라-모터 매핑 불일치 | Mac의 `pixel_to_motor_vals()`와 Hub의 `PAN_MIN/PAN_MAX`, `TILT_MIN/TILT_MAX` 확인 |
+| 모터 범위가 너무 작거나 큼 | 각도 범위 불일치 | `hub_pybricks_gesture_server.py`의 `PAN_MIN/PAN_MAX`, `TILT_MIN/TILT_MAX` 조정 |
 | macOS 카메라 미동작 | 카메라 권한 없음 | Terminal/iTerm/VS Code 카메라 권한 허용 |
 
 ---
 
-*2026-06-02 기준 `orca-svg/CS270_FinalProject@main`에 대해 검증. 방향: Pybricks
-BLE 직결 제어. 저장소 범위: `gesture_bt/`, `docs/`, `README*.md`. 하네스 파일,
-가상환경, 아카이브, MediaPipe `.task` 모델은 Git에서 무시됨.*
+*2026-06-03 Team5 Hub에서 Mac 측 원격 START 경로로 검증. 방향: Pybricks BLE
+직결 제어. 저장소 범위: `gesture_bt/`, `docs/`, `README*.md`. 가상환경,
+bytecode cache, local log, MediaPipe `.task` 모델은 업로드하지 않음.*
