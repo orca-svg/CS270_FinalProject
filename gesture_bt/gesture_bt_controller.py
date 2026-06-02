@@ -1,222 +1,367 @@
+#!/usr/bin/env python3
+"""Hand gesture controller for LEGO SPIKE Prime over Pybricks BLE.
+
+This version uses the current MediaPipe Tasks API instead of the removed
+`mp.solutions.hands` API. It works with recent MediaPipe releases such as
+0.10.30+ and Python versions where `mediapipe.solutions` is no longer present.
+
+Run on a Mac/laptop with a webcam.
+It detects one hand with MediaPipe Hand Landmarker, converts hand position into
+pan/tilt motor speed commands, and sends commands directly to the Hub over
+Bluetooth.
+
+Default gesture contract:
+  - Open hand / visible palm: pan and tilt follow hand offset.
+  - Open hand -> closed fist transition: send one fire latch.
+  - Keyboard q: quit and STOP.
+"""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
-import cv2
-import numpy as np
-import time
 import contextlib
-from bleak import BleakClient, BleakScanner
+import time
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Sequence, Tuple
 
-# ==========================================
-# 1. Pybricks BLE 통신 설정 (수정 불필요)
-# ==========================================
-PYBRICKS_COMMAND_EVENT_CHAR_UUID = "c5f50002-8280-46da-89f4-6d8051e4aeef"
-HUB_NAME = "Team5"
+try:
+    import cv2
+    import mediapipe as mp
+    import numpy as np
+except ModuleNotFoundError as exc:
+    missing = exc.name
+    package = "opencv-python" if missing == "cv2" else missing
+    raise SystemExit(
+        f"Missing package: {missing}. Install with: "
+        f"python -m pip install opencv-python mediapipe numpy bleak"
+    ) from exc
 
-# --- 모터 범위 (hub_pybricks_gesture_server.py 상수와 반드시 일치) ---
-PAN_MAX_DEG  = 35   # pan 범위: [-35°, +35°]  (Port F)
-TILT_MIN_DEG =  0   # tilt 최소 각도 (Port D)
-TILT_MAX_DEG = 80   # tilt 최대 각도 (Port D)
+try:
+    from mediapipe.tasks import python as mp_tasks_python
+    from mediapipe.tasks.python import vision as mp_vision
+except Exception as exc:
+    raise SystemExit(
+        "This controller requires the MediaPipe Tasks API. "
+        "Install a recent MediaPipe version with: python -m pip install -U mediapipe"
+    ) from exc
 
-# --- 포물선 예측 및 발사 튜닝 ---
-FLIGHT_TIME      = 0.4   # 고무줄 체공 시간 (초) — 멀수록 크게
-SMOOTHING        = 0.3   # 속도 EMA 가중치 (클수록 빠르고 노이즈 많음)
-ACCEL_SMOOTHING  = 0.05  # 가속도 EMA 가중치 (노이즈 억제용, 낮게 유지)
-FIRE_PX          = 20    # 예측 지점이 화면 중심에서 이 픽셀 이내이면 발사
-SEND_INTERVAL    = 0.1   # BLE 전송 최소 간격 (초)
+from pybricks_ble import DEFAULT_HUB_NAME, DryRunSender, PybricksBleSender, clamp
 
-class PybricksBleSender:
-    def __init__(self, hub_name):
-        self.hub_name = hub_name
-        self.client = None
-        self.ready = asyncio.Event()
-        self.connected = False
+# Official MediaPipe Hand Landmarker model. The controller downloads it once if
+# it is not already present locally.
+DEFAULT_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "models" / "hand_landmarker.task"
 
-    async def connect(self):
-        print(f"[{self.hub_name}] BLE 로봇 찾는 중...")
-        device = await BleakScanner.find_device_by_name(self.hub_name, timeout=10.0)
-        if not device:
-            raise RuntimeError("로봇을 찾을 수 없습니다. 전원과 Pybricks 코드를 확인하세요.")
-
-        self.client = BleakClient(device, disconnected_callback=self._handle_disconnect)
-        await self.client.connect()
-        await self.client.start_notify(PYBRICKS_COMMAND_EVENT_CHAR_UUID, self._handle_rx)
-        self.connected = True
-        print("✅ BLE 연결 완료! 로봇의 버튼을 눌러 프로그램을 시작하세요.")
-
-    def _handle_disconnect(self, _):
-        self.connected = False
-        print("🚨 로봇 연결 끊김!")
-
-    def _handle_rx(self, _, data: bytearray):
-        if data and data[0] == 0x01:
-            payload = bytes(data[1:])
-            if b"rdy" in payload:
-                self.ready.set()
-
-    @staticmethod
-    def _i8(value):
-        return max(-100, min(100, int(value))) & 0xFF
-
-    async def send(self, pan_err, tilt_err, fire):
-        if not self.client or not self.connected: return
-        try:
-            await asyncio.wait_for(self.ready.wait(), timeout=1.0)
-            self.ready.clear()
-            packet = bytes([ord("M"), self._i8(pan_err), self._i8(tilt_err), int(fire) & 0xFF])
-            await self.client.write_gatt_char(PYBRICKS_COMMAND_EVENT_CHAR_UUID, b"\x06" + packet, response=True)
-        except asyncio.TimeoutError:
-            pass
-
-    async def close(self):
-        if self.client:
-            await self.client.disconnect()
+# MediaPipe hand landmark connections. Defined locally so the code no longer
+# depends on the removed mp.solutions.hands.HAND_CONNECTIONS constant.
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20),
+    (0, 17),
+)
 
 
-def pixel_to_motor_vals(px, py, frame_w, frame_h):
-    """고정 카메라 픽셀 좌표 → 절대 모터 각도 명령값 [-100, +100] 변환.
-
-    웹캠이 포탑에 달리지 않고 독립적으로 고정되어 있으므로,
-    픽셀 위치를 모터 각도로 직접 1:1 매핑한다.
-
-    pan  (Port F): px=0 → -PAN_MAX_DEG, px=frame_w → +PAN_MAX_DEG
-    tilt (Port D): py=0(상단) → TILT_MAX_DEG(위), py=frame_h(하단) → TILT_MIN_DEG(아래)
-    """
-    # pan: 화면 좌우 전체 → [-PAN_MAX_DEG, +PAN_MAX_DEG]
-    pan_deg = (px - frame_w / 2) / (frame_w / 2) * PAN_MAX_DEG
-    pan_deg = max(-PAN_MAX_DEG, min(PAN_MAX_DEG, pan_deg))
-    pan_val = int(pan_deg / PAN_MAX_DEG * 100)   # [-100, +100]
-
-    # tilt: 화면 상하 전체 → [TILT_MAX_DEG, TILT_MIN_DEG] (위로 갈수록 각도 큼)
-    tilt_frac = 1.0 - py / frame_h               # 1.0=상단, 0.0=하단
-    tilt_deg  = TILT_MIN_DEG + tilt_frac * (TILT_MAX_DEG - TILT_MIN_DEG)
-    tilt_deg  = max(TILT_MIN_DEG, min(TILT_MAX_DEG, tilt_deg))
-    # [TILT_MIN_DEG, TILT_MAX_DEG] → [-100, +100]
-    tilt_val  = int((tilt_deg - TILT_MIN_DEG) / (TILT_MAX_DEG - TILT_MIN_DEG) * 200 - 100)
-
-    return pan_val, tilt_val
+@dataclass
+class HandState:
+    x: int
+    y: int
+    dx: int
+    dy: int
+    pan: int
+    tilt: int
+    fist: bool
 
 
-# ==========================================
-# 2. 메인 포물선 예측 사격 비전 루프
-# ==========================================
-async def run_shooter():
-    sender = PybricksBleSender(HUB_NAME)
+class OpenCVCamera:
+    def __init__(self, index: int, width: int, height: int) -> None:
+        self.cap = cv2.VideoCapture(index)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if not self.cap.isOpened():
+            raise RuntimeError(
+                f"Could not open camera index {index}. "
+                "On macOS, allow Terminal/iTerm/VS Code to access the camera."
+            )
+
+    def read(self):
+        ok, frame = self.cap.read()
+        return frame if ok else None
+
+    def close(self) -> None:
+        self.cap.release()
+
+
+def ensure_hand_landmarker_model(model_path: Path, model_url: str) -> Path:
+    """Download the MediaPipe .task model once if needed."""
+    model_path = model_path.expanduser().resolve()
+    if model_path.exists() and model_path.stat().st_size > 0:
+        return model_path
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Hand Landmarker model not found. Downloading to: {model_path}")
+    print("This is needed only once.")
+    try:
+        urllib.request.urlretrieve(model_url, model_path)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not download the MediaPipe Hand Landmarker model. "
+            f"Download it manually from {model_url} and save it as {model_path}"
+        ) from exc
+
+    if not model_path.exists() or model_path.stat().st_size == 0:
+        raise RuntimeError(f"Model download failed: {model_path}")
+    return model_path
+
+
+def create_hand_landmarker(args: argparse.Namespace):
+    model_path = ensure_hand_landmarker_model(Path(args.model_path), args.model_url)
+    base_options = mp_tasks_python.BaseOptions(model_asset_path=str(model_path))
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=base_options,
+        running_mode=mp_vision.RunningMode.VIDEO,
+        num_hands=1,
+        min_hand_detection_confidence=args.min_detection_confidence,
+        min_hand_presence_confidence=args.min_presence_confidence,
+        min_tracking_confidence=args.min_tracking_confidence,
+    )
+    return mp_vision.HandLandmarker.create_from_options(options)
+
+
+def estimate_palm_center(landmarks: Sequence[object], width: int, height: int) -> Tuple[int, int]:
+    palm_ids = (0, 5, 9, 13, 17)
+    xs = [landmarks[i].x * width for i in palm_ids]
+    ys = [landmarks[i].y * height for i in palm_ids]
+    return int(sum(xs) / len(xs)), int(sum(ys) / len(ys))
+
+
+def is_closed_fist(landmarks: Sequence[object]) -> bool:
+    tips = (8, 12, 16, 20)
+    pips = (6, 10, 14, 18)
+    bent = 0
+    for tip, pip in zip(tips, pips):
+        # In image coordinates, y is larger when lower in the image.
+        if landmarks[tip].y > landmarks[pip].y:
+            bent += 1
+    return bent >= 3
+
+
+def hand_to_speed(
+    hand_x: int,
+    hand_y: int,
+    frame_w: int,
+    frame_h: int,
+    args: argparse.Namespace,
+    fist: bool,
+) -> HandState:
+    cx, cy = frame_w // 2, frame_h // 2
+    dx, dy = hand_x - cx, hand_y - cy
+
+    if fist:
+        return HandState(hand_x, hand_y, dx, dy, 0, 0, True)
+
+    if abs(dx) < args.deadzone_px:
+        pan = 0
+    else:
+        pan = int(clamp((dx / (frame_w / 2)) * args.max_pan_speed * args.gain, -args.max_pan_speed, args.max_pan_speed))
+
+    if abs(dy) < args.deadzone_px:
+        tilt = 0
+    else:
+        # Hand above center should tilt up. Image y grows downward, hence minus.
+        tilt = int(clamp((-dy / (frame_h / 2)) * args.max_tilt_speed * args.gain, -args.max_tilt_speed, args.max_tilt_speed))
+
+    return HandState(hand_x, hand_y, dx, dy, pan, tilt, False)
+
+
+def draw_hand_landmarks(frame, landmarks: Sequence[object]) -> None:
+    h, w = frame.shape[:2]
+    points = []
+    for lm in landmarks:
+        x = int(clamp(lm.x, 0.0, 1.0) * w)
+        y = int(clamp(lm.y, 0.0, 1.0) * h)
+        points.append((x, y))
+
+    for a, b in HAND_CONNECTIONS:
+        cv2.line(frame, points[a], points[b], (80, 220, 80), 2)
+    for i, point in enumerate(points):
+        radius = 5 if i in (0, 4, 8, 12, 16, 20) else 3
+        cv2.circle(frame, point, radius, (0, 255, 255), -1)
+
+
+def draw_overlay(frame, state: Optional[HandState], last_command: str, mirror: bool) -> None:
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    cv2.drawMarker(frame, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 36, 2)
+    cv2.line(frame, (cx, 0), (cx, h), (70, 70, 70), 1)
+    cv2.line(frame, (0, cy), (w, cy), (70, 70, 70), 1)
+
+    if state is None:
+        cv2.putText(frame, "NO HAND", (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+    else:
+        color = (0, 0, 255) if state.fist else (0, 255, 0)
+        label = "FIST = FIRE" if state.fist else "PALM = FOLLOW"
+        cv2.circle(frame, (state.x, state.y), 12, color, -1)
+        cv2.line(frame, (cx, cy), (state.x, state.y), (0, 255, 255), 2)
+        cv2.putText(frame, label, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        cv2.putText(
+            frame,
+            f"dx={state.dx} dy={state.dy} M,{state.pan},{state.tilt}",
+            (12, 62),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (230, 230, 230),
+            2,
+        )
+
+    cv2.putText(
+        frame,
+        f"q quit | mirror={'on' if mirror else 'off'}",
+        (12, h - 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        2,
+    )
+    cv2.putText(frame, last_command[-80:], (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
+
+async def run(args: argparse.Namespace) -> None:
+    sender = DryRunSender() if args.dry_run else PybricksBleSender(args.hub_name, args.scan_timeout)
+    if hasattr(sender, "print_sends"):
+        sender.print_sends = args.print_sends
     await sender.connect()
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("🚨 카메라를 열 수 없습니다.")
-        return
+    camera = OpenCVCamera(args.camera, args.width, args.height)
+    detector = create_hand_landmarker(args)
 
-    FRAME_W, FRAME_H = 640, 480
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
-    CENTER_X, CENTER_Y = FRAME_W // 2, FRAME_H // 2
-
-    # 상태 추적 변수 초기화
-    prev_x, prev_y = None, None
-    prev_time = time.time()
-    vx_smooth, vy_smooth = 0.0, 0.0
-    prev_vy = 0.0
-    ay_smooth = 0.0
-    last_send_time = 0
-
-    print("🎯 포물선 요격 시스템 가동! 표적을 위로 던져보세요.")
+    cv2.namedWindow("Gesture BT Controller", cv2.WINDOW_NORMAL)
+    last_send_time = 0.0
+    last_command = "ready"
+    no_hand_since = time.time()
+    last_timestamp_ms = 0
+    prev_fist = False     # for edge detection: send fire=1 only on open→fist transition
+    pending_fire = False  # latch: holds fire=1 until next send interval
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret: break
-            frame = cv2.flip(frame, 1)
-            
-            # 빨간색 추출
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            mask1 = cv2.inRange(hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
-            mask2 = cv2.inRange(hsv, np.array([170, 120, 70]), np.array([180, 255, 255]))
-            mask = mask1 + mask2
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            frame = camera.read()
+            if frame is None:
+                print("Camera frame read failed.")
+                break
+            if args.mirror:
+                frame = cv2.flip(frame, 1)
 
-            target_x, target_y = None, None
-            fire_trigger = 0
+            frame_h, frame_w = frame.shape[:2]
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb = np.ascontiguousarray(rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-            if contours:
-                c = max(contours, key=cv2.contourArea)
-                if cv2.contourArea(c) > 500:
-                    x, y, w, h = cv2.boundingRect(c)
-                    target_x, target_y = x + w // 2, y + h // 2
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.circle(frame, (target_x, target_y), 5, (0, 255, 0), -1)
+            timestamp_ms = int(time.monotonic() * 1000)
+            if timestamp_ms <= last_timestamp_ms:
+                timestamp_ms = last_timestamp_ms + 1
+            last_timestamp_ms = timestamp_ms
 
-            current_time = time.time()
-            dt = current_time - prev_time
+            result = detector.detect_for_video(mp_image, timestamp_ms)
+            state: Optional[HandState] = None
 
-            if target_x is not None and target_y is not None:
-                if prev_x is not None and dt > 0:
-                    # 1. 속도 연산 (1차 예측)
-                    vx_raw = (target_x - prev_x) / dt
-                    vy_raw = (target_y - prev_y) / dt
-                    
-                    vx_smooth = (SMOOTHING * vx_raw) + ((1 - SMOOTHING) * vx_smooth)
-                    vy_smooth = (SMOOTHING * vy_raw) + ((1 - SMOOTHING) * vy_smooth)
-                    
-                    # 2. 가속도 연산 (2차 예측: 중력 포물선 궤적)
-                    ay_raw = (vy_smooth - prev_vy) / dt
-                    ay_smooth = (ACCEL_SMOOTHING * ay_raw) + ((1 - ACCEL_SMOOTHING) * ay_smooth)
-                
-                # 3. 미래 위치(조준점) 계산 (X축은 등속, Y축은 등가속도)
-                predict_x = int(target_x + (vx_smooth * FLIGHT_TIME))
-                predict_y = int(target_y + (vy_smooth * FLIGHT_TIME) + (0.5 * ay_smooth * (FLIGHT_TIME ** 2)))
-                
-                predict_x = max(0, min(FRAME_W, predict_x))
-                predict_y = max(0, min(FRAME_H, predict_y))
-
-                # 시각화 (현재 타겟과 예측 지점 연결)
-                cv2.line(frame, (target_x, target_y), (predict_x, predict_y), (0, 255, 255), 2)
-                cv2.circle(frame, (predict_x, predict_y), 10, (0, 0, 255), 2)
-                
-                # 디버깅: 속도와 가속도 표시
-                cv2.putText(frame, f"VY: {int(vy_smooth)} AY: {int(ay_smooth)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                cv2.putText(frame, "PARABOLIC PREDICT", (predict_x - 40, predict_y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
-                # 4. 절대 모터 각도 계산 (고정 카메라 → 독립 모터 직접 변환)
-                pan_val, tilt_val = pixel_to_motor_vals(predict_x, predict_y, FRAME_W, FRAME_H)
-
-                # 발사 조건: 예측 지점이 화면 중심 FIRE_PX 이내
-                # (pan ≈ 0°, tilt ≈ 중간값 → 정면 기준 발사)
-                if abs(predict_x - CENTER_X) < FIRE_PX and abs(predict_y - CENTER_Y) < FIRE_PX:
-                    fire_trigger = 1
-                    cv2.putText(frame, "FIRE!!!", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-
-                # 다음 프레임 계산을 위한 값 저장
-                prev_x, prev_y = target_x, target_y
-                prev_vy = vy_smooth
+            if result.hand_landmarks:
+                no_hand_since = time.time()
+                landmarks = result.hand_landmarks[0]
+                draw_hand_landmarks(frame, landmarks)
+                hand_x, hand_y = estimate_palm_center(landmarks, frame_w, frame_h)
+                cx, cy = frame_w // 2, frame_h // 2
+                dx = hand_x - cx
+                dy = hand_y - cy
+                fist = is_closed_fist(landmarks)
+                # pan_err / tilt_err clamped to [-100, 100]
+                pan_err  = int(clamp(dx, -100, 100))
+                tilt_err = int(clamp(dy, -100, 100))
+                # latch fire on open→fist transition; consumed at send time
+                if fist and not prev_fist:
+                    pending_fire = True
+                prev_fist = fist
+                state = HandState(hand_x, hand_y, dx, dy, pan_err, tilt_err, fist)
             else:
-                # 표적 없음: pan=0°, tilt=중간값(40°)으로 복귀
-                pan_val, tilt_val = 0, 0
-                prev_x, prev_y = None, None
-                vx_smooth, vy_smooth = 0.0, 0.0
-                prev_vy = 0.0
-                ay_smooth = 0.0
+                # no hand: send zero error, no fire
+                pan_err, tilt_err = 0, 0
+                prev_fist = False
 
-            prev_time = current_time
+            now = time.time()
+            if now - last_send_time >= args.send_interval:
+                if result.hand_landmarks:
+                    fire_to_send = 1 if pending_fire else 0
+                    pending_fire = False
+                    command = f"M,{pan_err},{tilt_err},{fire_to_send}"
+                else:
+                    command = "M,0,0,0"
+                if result.hand_landmarks or now - no_hand_since > args.no_hand_stop_delay:
+                    await sender.send(command)
+                    last_command = command
+                    last_send_time = now
 
-            cv2.line(frame, (CENTER_X - 20, CENTER_Y), (CENTER_X + 20, CENTER_Y), (255, 255, 255), 2)
-            cv2.line(frame, (CENTER_X, CENTER_Y - 20), (CENTER_X, CENTER_Y + 20), (255, 255, 255), 2)
+            # Hub가 침묵하면(프로그램 멈춤) 사용자에게 알림
+            if hasattr(sender, "maybe_warn_stale"):
+                sender.maybe_warn_stale()
 
-            if current_time - last_send_time >= SEND_INTERVAL:
-                await sender.send(pan_val, tilt_val, fire_trigger)
-                last_send_time = current_time
+            draw_overlay(frame, state, last_command, args.mirror)
+            cv2.imshow("Gesture BT Controller", frame)
+            key = cv2.waitKey(1) & 0xFF
 
-            cv2.imshow("Aimbot System (Parabolic Prediction)", frame)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if key == ord("q"):
+                await sender.send("STOP")
                 break
 
+            await asyncio.sleep(0)
+
     finally:
-        await sender.send(0, 0, 0)
-        cap.release()
+        with contextlib.suppress(Exception):
+            await sender.send("STOP", timeout=0.2)
+        with contextlib.suppress(Exception):
+            detector.close()
+        camera.close()
         cv2.destroyAllWindows()
         await sender.close()
 
-if __name__ == "__main__":
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--dry-run", action="store_true", help="Do not connect to BLE; print commands only.")
+    p.add_argument("--hub-name", default=DEFAULT_HUB_NAME, help="Pybricks BLE hub name.")
+    p.add_argument("--scan-timeout", type=float, default=15.0)
+    p.add_argument("--print-sends", action="store_true", help="Print every command sent to the Hub for debugging.")
+    p.add_argument("--camera", type=int, default=0, help="OpenCV camera index. Use 0 for most webcams.")
+    p.add_argument("--width", type=int, default=640)
+    p.add_argument("--height", type=int, default=480)
+    p.add_argument("--mirror", action="store_true", default=True)
+    p.add_argument("--no-mirror", action="store_false", dest="mirror")
+    p.add_argument("--deadzone-px", type=int, default=28)
+    p.add_argument("--gain", type=float, default=1.0)
+    p.add_argument("--max-pan-speed", type=int, default=70)
+    p.add_argument("--max-tilt-speed", type=int, default=80)
+    p.add_argument("--send-interval", type=float, default=0.10)
+    p.add_argument("--no-hand-stop-delay", type=float, default=0.25)
+    p.add_argument("--min-detection-confidence", type=float, default=0.65)
+    p.add_argument("--min-presence-confidence", type=float, default=0.65)
+    p.add_argument("--min-tracking-confidence", type=float, default=0.65)
+    p.add_argument("--model-path", default=str(DEFAULT_MODEL_PATH), help="Path to hand_landmarker.task model file.")
+    p.add_argument("--model-url", default=DEFAULT_MODEL_URL, help="URL used to download the hand landmarker model if missing.")
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     with contextlib.suppress(asyncio.CancelledError):
-        asyncio.run(run_shooter())
+        asyncio.run(run(args))
+
+
+if __name__ == "__main__":
+    main()
