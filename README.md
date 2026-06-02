@@ -28,8 +28,11 @@ pip install -r requirements_gesture_bt.txt
 ```
 
 **Then:** in [Pybricks Code](https://code.pybricks.com), upload
-`hub_pybricks_gesture_server.py`, run it once, and disconnect. Press the Hub
-center button to start the saved program when the Mac connects.
+`hub_pybricks_gesture_server.py`, save it on the Hub, and disconnect Pybricks
+Code/SPIKE App before running the Mac script. The Mac-side tools send a
+Pybricks remote `START` command automatically, using the Team5 connection path
+verified on 2026-06-03. Use `--no-auto-start` only if you want to start the
+Hub program manually with the center button.
 
 ## 🧭 Which script do I run?
 
@@ -38,8 +41,8 @@ Three Mac-side entry points, all sharing `pybricks_ble.py` for BLE:
 | Script | Purpose | Needs robot? |
 |--------|---------|:------------:|
 | **`bt_manual_motor_test.py`** | Verify BLE + motor wiring with no camera. **Run this first.** | ✅ Yes |
-| **`gesture_bt_controller.py`** | Hand-gesture control (MediaPipe): palm aims, fist fires. | `--dry-run` → No |
-| **`balloon_intercept.py`** | C-RAM demo: HSV target detection + parabolic lead-shot + auto-fire. | `--dry-run` → No |
+| **`gesture_bt_controller.py`** | Hand-gesture control (MediaPipe): palm aims, fist fires. | ✅ Yes |
+| **`balloon_intercept.py`** | C-RAM demo: red target detection + parabolic lead-shot + auto-fire. | ✅ Yes |
 
 ```bash
 # 1) Wiring check (robot required)
@@ -49,13 +52,12 @@ python bt_manual_motor_test.py --hub-name "Team5" --print-sends
 python gesture_bt_controller.py --hub-name "Team5" --print-sends
 
 # 3) Balloon / target interception  (preferred demo)
-python balloon_intercept.py --hub-name "Team5" --color-picker --print-sends
+python balloon_intercept.py --hub-name "Team5" --print-sends
 ```
 
-> 💡 **No robot? Use `--dry-run`.** Both `gesture_bt_controller.py` and
-> `balloon_intercept.py` run the full camera/vision/prediction loop and just
-> print packets instead of sending BLE — so vision and prediction work can
-> proceed in parallel without occupying the single Hub.
+> The current uploaded runner is the working robot path. Keep the Hub powered,
+> disconnect Pybricks Code/SPIKE App, and let the Mac script auto-start the
+> saved Hub program.
 
 ---
 
@@ -106,17 +108,18 @@ byte alignment is lost.
 | 2 | `tilt_err_i8` | Signed tilt error `[-100, 100]`, encoded `value & 0xFF` |
 | 3 | `fire` | `1` latches one firing cycle, else `0` |
 
-The Hub **accumulates** errors into a target angle (it does not command raw speed):
+The current Hub runner maps signed command values directly into absolute target
+angles:
 
 ```python
-pan_target  = clamp(pan_target  - PAN_SIGN  * pan_err  * GAIN, PAN_MIN,  PAN_MAX)
-tilt_target = clamp(tilt_target - TILT_SIGN * tilt_err * GAIN, TILT_MIN, TILT_MAX)
+pan_target  = clamp(pan_val / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
+tilt_target = clamp((tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
+                    TILT_MIN, TILT_MAX)
 ```
 
 The Hub replies `rdy` after each packet (plus a 200 ms heartbeat to survive
 dropped notifications), and prints status lines the Mac echoes as `[Hub] ...`:
-`READY`, `ARMED`, `FIRING`, `RETURNING`, `FIRED`, and shot snapshots
-`SHOT_START / SHOT_RELEASE / SHOT_DONE` (with live `pan_F`, `tilt_D`, `c_C` angles).
+`READY`, `ARMED`, `FIRING`, `RETURNING`, and `FIRED`.
 
 > 📖 Full details: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
@@ -138,12 +141,12 @@ Expected path:
 ```text
 [SCAN] name='Team5' timeout=15.0s
 [BLE] connected to Team5
-[Hub] READY
-[Hub] ARMED
-[READY] first rdy received.
+[START] sent remote START command to Hub.
+[STATUS] Hub user program: RUNNING
+[READY] rdy received.
 [SEND] M,100,0,0 -> b'M\x64\x00\x00'
 [SEND] M,0,0,1   -> b'M\x00\x00\x01'
-[Hub] SHOT_START ... → FIRING → SHOT_RELEASE → RETURNING → SHOT_DONE → ARMED → FIRED
+[Hub] FIRING → RETURNING → ARMED → FIRED
 ```
 
 ### 2. Hand gesture control
@@ -162,24 +165,21 @@ python gesture_bt_controller.py --hub-name "Team5" --print-sends
 ### 3. Balloon / target interception (preferred demo)
 
 ```bash
-python balloon_intercept.py --hub-name "Team5" --color-picker --print-sends
+python balloon_intercept.py --hub-name "Team5" --print-sends
 ```
 
-Detects a colored target by HSV, predicts a future impact point from smoothed
-velocity + vertical acceleration, and fires once the predicted point holds
-inside the lock threshold for `--hold-frames`.
+Detects a red target by HSV, predicts a future impact point from smoothed
+velocity + vertical acceleration, and fires when the predicted point enters the
+center lock window.
 
 | Option | Purpose |
 |--------|---------|
-| `--color-picker` | Click the target color in the camera window |
-| `--hsv-lower`, `--hsv-upper` | Fixed HSV range (skip the picker) |
 | `--flight-time` | Projectile travel time used by the parabolic predictor |
-| `--lead-frames` | Extra frame-based lead on top of `--flight-time` |
-| `--velocity-smoothing` / `--accel-smoothing` | EMA coefficients (velocity / vertical accel) |
-| `--fire-threshold` | Pixel error threshold for auto-fire |
-| `--hold-frames` | Consecutive lock frames required before firing |
-| `--fire-cooldown` | Seconds to suppress re-fire after a shot |
-| `--mode rl` | Experimental Q-table correction layer (`--qtable`) |
+| `--fire-px` | Center lock window, in pixels |
+| `--min-area` | Minimum red contour area |
+| `--send-interval` | Minimum BLE command interval |
+| `--camera`, `--width`, `--height` | Camera index and frame size |
+| `--no-auto-start` | Disable Mac-side remote START |
 
 ---
 
@@ -206,7 +206,7 @@ inside the lock threshold for `--hold-frames`.
 | Manual BLE motor test | ✅ | P2 |
 | Hand gesture control + fist-fire latch | ✅ | P3 · P2 |
 | Balloon/target HSV interception + parabolic prediction | ✅ | P3 · P4 |
-| `--dry-run` camera-only mode (no robot) | ✅ | P3 · P5 |
+| Mac-side remote START + `rdy` flow control | ✅ | P2 |
 | Team roles + README dashboard + docs | ✅ | P5 |
 | Camera-to-turret calibration routine | 🔜 | P5 · P2 |
 | Deterministic recorded-video replay harness | 🔜 | P5 |
@@ -220,7 +220,7 @@ inside the lock threshold for `--hold-frames`.
 | # | Item | Owner | Why it matters | Device? |
 |:-:|------|:-----:|----------------|:-------:|
 | 1 | **Camera-to-turret calibration** | P5 · P2 | Error-based steering works, but repeatable interception needs a measured pixel→angle mapping plus sign/gain confirmation. Biggest accuracy lever. | 🔴 Yes |
-| 2 | **Recorded-video replay harness** | P5 | `--dry-run` already runs live without a robot; a deterministic clip-replay mode lets P3/P4 compare detection/prediction changes on identical input. | 🟢 No |
+| 2 | **Recorded-video replay harness** | P5 | A deterministic clip-replay mode lets P3/P4 compare detection/prediction changes on identical input without occupying the robot. | 🟢 No |
 | 3 | **Target robustness** | P3 | Min/max area gating, frame-to-frame continuity, and lost-target recovery cut false locks and accidental shots. | 🟢 No |
 | 4 | **Flight-time / latency calibration** | P4 · P5 | BLE + processing + projectile delay set the correct lead; measure and fold into the predictor. | 🔴 Yes |
 | 5 | **Evaluation logging** | P5 | Hit/miss, prediction error, and trial conditions to CSV — evidence for the final report. | 🟡 Partial |
@@ -232,13 +232,13 @@ Run device-free work in parallel; book the single robot in short slots.
 
 | Phase | 🔴 Robot slot | 🟢 Parallel work (no robot) |
 |-------|--------------|-----------------------------|
-| **1. Bring-up** | P1/P2: wiring, Hub upload, `bt_manual_motor_test.py` | P3 HSV tuning (`--dry-run`), P4 prediction on clips, P5 docs |
+| **1. Bring-up** | P1/P2: wiring, Hub upload, `bt_manual_motor_test.py` | P3 HSV tuning, P4 prediction on clips, P5 docs |
 | **2. Calibration** | P2/P5: signs, gains, thresholds | P3 detection robustness, P4 lead/latency model |
 | **3. Integration** | All: scheduled end-to-end trials | P5 logs results, P3/P4 tune from recorded data |
 | **4. Report/demo** | Final rehearsal | P5 prepares README/report figures + demo notes |
 
-> 💡 Because `--dry-run` exists, **3 of 5 members can make progress without the
-> robot at any time.** Reserve robot slots for wiring, calibration, and live firing.
+> 💡 Reserve robot slots for wiring, calibration, and live firing. Vision and
+> prediction changes should be developed against saved camera clips whenever possible.
 
 ---
 
@@ -247,16 +247,20 @@ Run device-free work in parallel; book the single robot in short slots.
 | Symptom | Likely cause | Action |
 |---------|--------------|--------|
 | `[SCAN] no matching Hub` | App still connected, Hub off, or wrong name | Disconnect Pybricks Code/SPIKE app, power-cycle Hub, retry (UUID fallback runs after a name miss) |
-| `[BLE] connected` but no `[READY]` | Saved Hub program not running | Press Hub center button; confirm display shows `BT` |
-| `[WAIT] Hub not sending rdy` | No readiness heartbeat yet | Press center button, disconnect other apps, confirm `BT` on display |
+| Repeating `STOPPED` status after connect | Saved Hub program is not running | Default scripts send remote `START` automatically; verify `[START] sent remote START command to Hub.` appears |
+| `[BLE] connected` but no `[READY]` | Hub program did not send `rdy` | Keep `--auto-start` enabled, disconnect Pybricks Code/SPIKE App, power-cycle Hub, retry |
+| `[WAIT] Hub not sending rdy` | No readiness heartbeat yet | Retry with `--debug-rx`; use `--no-auto-start` only for manual center-button diagnostics |
 | `[STALE] Hub is silent` | Link alive but Hub program stopped/crashed | Restart Hub program; check `[Hub] FATAL...` output |
 | `[DISCONNECT]` / `[RECONNECT]` | BLE link dropped | Keep Hub near and powered; tools rescan every 3 s unless `--no-reconnect` |
-| Motor moves the wrong way | Sign mismatch | Flip `PAN_SIGN` / `TILT_SIGN` in Hub code |
-| Motor barely moves | Gain too low | Increase `GAIN` carefully in Hub code |
+| Motor points to the wrong side | Camera-to-motor mapping mismatch | Check `pixel_to_motor_vals()` on Mac and `PAN_MIN/PAN_MAX` or `TILT_MIN/TILT_MAX` on the Hub |
+| Motor range is too small or too wide | Angle range mismatch | Adjust `PAN_MIN/PAN_MAX` or `TILT_MIN/TILT_MAX` in `hub_pybricks_gesture_server.py` |
 | Camera won't open (macOS) | Missing camera permission | Grant Terminal/iTerm/VS Code camera access |
 
 ---
 
-*Verified 2026-06-02 against `orca-svg/CS270_FinalProject@main`. Direction:
+*Verified 2026-06-03 against the Team5 Hub with Mac-side remote START. Direction:
+Pybricks BLE direct control. Repository scope: `gesture_bt/`, `docs/`,
+`README*.md`. Virtualenvs, bytecode caches, local logs, and MediaPipe `.task`
+models are intentionally not uploaded.*
 Pybricks BLE direct control. Repo boundary: `gesture_bt/`, `docs/`, `README*.md`.
 Harness files, venvs, archives, and the MediaPipe `.task` model are Git-ignored.*
