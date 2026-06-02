@@ -72,6 +72,7 @@ gesture_bt/
 
 docs/                            # Deep-dive technical docs (EN + ko/)
   ARCHITECTURE.md  PROTOCOL.md  STATE_MACHINES.md  PREDICTION.md
+  CHANGELOG.md                   # Change archive (cause → change → resolution)
 ```
 
 The MediaPipe hand-landmarker model downloads on first run and is Git-ignored.
@@ -121,7 +122,8 @@ dropped notifications), and prints status lines the Mac echoes as `[Hub] ...`:
 > 📖 Full details: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 > [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) ·
-> [`docs/PREDICTION.md`](docs/PREDICTION.md)
+> [`docs/PREDICTION.md`](docs/PREDICTION.md) ·
+> [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (change archive)
 
 ---
 
