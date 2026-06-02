@@ -5,6 +5,28 @@
 Real-time hand-gesture BLE control system for a LEGO SPIKE Prime pan-tilt launcher.
 A Mac running MediaPipe hand tracking sends motor commands over BLE to the Hub, which accumulates a target angle, tracks it, and fires on a fist gesture.
 
+## Quick Start
+
+```bash
+# 1. Clone and enter the gesture_bt directory
+git clone https://github.com/orca-svg/CS270_FinalProject.git
+cd CS270_FinalProject/gesture_bt
+
+# 2. Create a virtualenv and install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements_gesture_bt.txt
+
+# 3. Test camera + gesture detection WITHOUT connecting to Hub
+python gesture_bt_controller.py --dry-run
+
+# 4. Test BLE + motor wiring WITHOUT camera (Hub must be running)
+python bt_manual_motor_test.py --hub-name "Team5"
+
+# 5. Full gesture control
+python gesture_bt_controller.py --hub-name "Team5" --print-sends
+```
+
 ## Repository Structure
 
 ```text
@@ -14,7 +36,7 @@ gesture_bt/
   bt_manual_motor_test.py        # Manual BLE motor test (no camera)
   requirements_gesture_bt.txt    # Mac-side Python dependencies
   models/
-    hand_landmarker.task         # MediaPipe hand landmark model
+    hand_landmarker.task         # MediaPipe hand landmark model (auto-downloaded on first run)
 
 Final_project/
   calibration_targeting.py       # Calibration-based aiming prototype
@@ -50,21 +72,25 @@ Missing motors are tolerated: each port is probed with `safe_motor`, which logs
 
 ### 1. Hub (Pybricks)
 
-Upload `gesture_bt/hub_pybricks_gesture_server.py` via [Pybricks Code](https://code.pybricks.com).
-Position the robot at the zero/loaded state before running: pan, tilt, and the C
-motor all call `reset_angle(0)` at startup, so the physical pose at launch becomes
-the 0° reference (pan/tilt center, C motor loaded). Press the Hub center button to start.
+1. Go to [Pybricks Code](https://code.pybricks.com) and connect to the SPIKE Hub.
+2. Open `gesture_bt/hub_pybricks_gesture_server.py` and upload it to the Hub.
+3. **Position the robot at the zero/loaded state before running**: pan, tilt, and the C
+   motor all call `reset_angle(0)` at startup, so the physical pose at launch becomes
+   the 0° reference (pan/tilt center, C motor fully loaded).
+4. Click Run once in Pybricks Code to verify the Hub prints `READY` and `rdy`.
+5. Click Stop, then **disconnect Pybricks Code** (the Mac BLE client cannot connect while Pybricks Code holds the connection).
+6. When the Mac script connects, press the Hub center button to start the saved program.
 
-### 2. Mac
+### 2. Mac — Install dependencies
 
 ```bash
-cd gesture_bt
+cd CS270_FinalProject/gesture_bt   # or wherever you cloned the repo
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements_gesture_bt.txt
 ```
 
-Dependencies (`requirements_gesture_bt.txt`):
+Dependencies:
 
 ```text
 opencv-python
@@ -74,25 +100,88 @@ bleak
 ```
 
 The MediaPipe Hand Landmarker model is downloaded automatically on first run if
-`gesture_bt/models/hand_landmarker.task` is not already present.
+`models/hand_landmarker.task` is not already present. An internet connection is
+required only for that first download.
 
-### 3. Manual BLE test (no camera)
+### 3. Dry-run test (no Hub needed)
+
+Test camera + gesture detection without any BLE connection:
+
+```bash
+python gesture_bt_controller.py --dry-run
+```
+
+A camera preview window opens. Commands that would be sent to the Hub are printed
+to the terminal instead:
+
+```text
+[DRY] M,20,-15,0
+[DRY] M,-35,10,0
+[DRY] M,0,0,0
+```
+
+Use this step to confirm the camera opens, MediaPipe detects your hand, and the
+fist gesture registers correctly before connecting to the Hub.
+
+### 4. Manual BLE test (no camera)
+
+With the Hub running its saved program, test BLE + motor wiring:
 
 ```bash
 python bt_manual_motor_test.py --hub-name "Team5"
 ```
 
-Press the Hub center button when BLE connects and wait for `[Hub] READY`. The
-script drives a fixed sequence of pan/tilt target pushes and one fire, confirming
-motor wiring before using the camera. Default `--hub-name` is `Team5`.
+When the terminal says `BLE connected`, press the Hub center button once.
 
-### 4. Gesture control
+Expected output:
+
+```text
+[Hub] READY
+[Hub] ARMED
+Hub rdy received. Starting fixed-packet motor test...
+[SEND] M,100,0,0 -> b'M\x64\x00\x00'
+[SEND] M,-100,0,0 -> b'M\x9c\x00\x00'
+...
+[SEND] M,0,0,1 -> b'M\x00\x00\x01'
+[Hub] FIRING
+[Hub] RETURNING
+[Hub] ARMED
+[Hub] FIRED
+Manual motor test done.
+```
+
+> **Note:** The default `--hub-name` in this script is `Team5`. Adjust to match
+> your Hub's Bluetooth name.
+
+### 5. Gesture control
 
 ```bash
 python gesture_bt_controller.py --hub-name "Team5" --print-sends
 ```
 
-Common command-line options (from `build_parser`):
+When BLE connects, press the Hub center button. A camera preview appears showing
+hand landmark tracking.
+
+**Gestures:**
+
+| Gesture | Action |
+|---------|--------|
+| Open palm in frame | Pan/tilt tracking — palm offset from frame center drives `pan_err`/`tilt_err` |
+| No hand detected | Sends `M,0,0,0` after `--no-hand-stop-delay` seconds (default 0.25 s) |
+| Closed fist (open→fist transition) | Fires once — `fire=1` is edge-detected and latched until the next send interval |
+| Hand in center deadzone | Pan/tilt commands are zero (deadzone = `--deadzone-px`, default 28 px) |
+
+**Keyboard:**
+
+| Key | Action |
+|-----|--------|
+| `q` | Quit and send STOP to Hub |
+
+> **Note:** The camera overlay displays `c center | f fire | w/x wheels` but those
+> keys are **not currently active**. The only keyboard shortcut is `q` to quit.
+> Firing is exclusively triggered by the closed-fist gesture.
+
+**Common options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -116,18 +205,38 @@ Common command-line options (from `build_parser`):
 | `--model-path` | `models/hand_landmarker.task` | Local model file path |
 | `--model-url` | MediaPipe float16 model URL | Download source if model is missing |
 
-| Gesture / Key | Action |
-|---------------|--------|
-| Open palm | Pan/tilt tracking: palm offset from frame center → pan_err/tilt_err |
-| Closed fist (open→fist transition) | Fire once (edge-detected, latched until next send) |
-| `q` | Quit and send STOP |
+## Troubleshooting
+
+**`Could not open camera index 0`**
+On macOS, go to System Settings → Privacy & Security → Camera and allow access
+for Terminal, iTerm2, or your IDE.
+
+**`Could not find 'Team5'`**
+- Disconnect Pybricks Code from the Hub.
+- Close the LEGO SPIKE app.
+- Make sure the Hub is powered on.
+- Confirm the Hub's Bluetooth name matches `--hub-name` exactly.
+
+**Hub connects but never sends `rdy` / Mac is stuck waiting**
+Press the Hub center button to start the saved program. The Hub only sends `rdy`
+after the program starts. If the Hub button LED is off, the program is not running.
+
+**Model download fails on first run**
+An internet connection is required for the one-time download of
+`models/hand_landmarker.task`. To download it manually, use:
+
+```bash
+# macOS / Linux
+curl -L -o gesture_bt/models/hand_landmarker.task \
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+```
+
+Or pass `--model-path /path/to/hand_landmarker.task` to use a file you already have.
 
 ## BLE Protocol
 
-Mac → Hub: 4-byte fixed packet, written to the Pybricks command characteristic
+Mac → Hub: 4-byte fixed packet written to the Pybricks command characteristic
 (`c5f50002-8280-46da-89f4-6d8051e4aeef`) with a leading `0x06` Pybricks prefix.
-The packet layout is built by `PybricksBleSender._packet_for` and parsed on the
-Hub in the main loop.
 
 | Byte | Field | Description |
 |------|-------|-------------|
@@ -136,18 +245,14 @@ Hub in the main loop.
 | 2 | tilt_err | int8 sent as `value & 0xFF`, clamped to [−100, +100] |
 | 3 | fire | 0 or 1 (1 latches a shot on the Hub) |
 
-The `S` opcode is sent as `b"S\x00\x00\x00"` and stops all motors, exiting the
-Hub loop.
+The `S` opcode (`b"S\x00\x00\x00"`) stops all motors and exits the Hub loop.
 
-Hub → Mac: the Hub replies `b"rdy"` once at startup and again after each received
-4-byte packet. The Mac waits on this `rdy` (an `asyncio.Event`) before sending the
-next packet, giving simple one-in-flight flow control. Status lines such as
-`READY`, `ARMED`, `FIRING`, `RETURNING`, and `FIRED` are sent as newline-terminated
-text and printed as `[Hub] ...`.
+Hub → Mac: the Hub replies `b"rdy"` once at startup and again after each 4-byte
+packet, providing one-in-flight flow control. Status lines (`READY`, `ARMED`,
+`FIRING`, `RETURNING`, `FIRED`) are sent as newline-terminated text and printed
+as `[Hub] ...`.
 
 ## Architecture Notes
-
-Derived directly from `hub_pybricks_gesture_server.py` and `gesture_bt_controller.py`.
 
 **Target-accumulation tracking (Hub)**: each `M` packet nudges an internal target
 angle rather than commanding a raw speed:
@@ -157,8 +262,8 @@ pan_target  = clamp(pan_target  − PAN_SIGN  * pan_err  * GAIN, PAN_MIN,  PAN_M
 tilt_target = clamp(tilt_target − TILT_SIGN * tilt_err * GAIN, TILT_MIN, TILT_MAX)
 ```
 
-The Hub then calls `pan_motor.track_target(int(pan_target))` /
-`tilt_motor.track_target(int(tilt_target))` every loop iteration (~5 ms wait).
+The Hub then calls `pan_motor.track_target()` / `tilt_motor.track_target()` every
+loop iteration (~5 ms wait).
 
 **C-motor fire state machine (reciprocating)**:
 
@@ -166,32 +271,21 @@ The Hub then calls `pan_motor.track_target(int(pan_target))` /
 armed → firing (dc +C_FIRE_DC to C_FIRE_ANGLE°) → returning (dc −C_RETURN_DC to 0°) → armed
 ```
 
-`armed` waits for `can_fire`; `firing` advances until the angle reaches
-`C_FIRE_ANGLE − C_TOLERANCE`; `returning` reverses until the angle is within
-`C_TOLERANCE` of 0°, at which point the shot is reported `FIRED` and the latch clears.
+**Fire latch**: `fire=1` is edge-detected on the open→fist transition and held
+until the next send interval, so one fist gesture = exactly one shot.
 
-**Fire latch**: on the Mac, `fire=1` is edge-detected on the open→fist transition
-(`pending_fire`) and held until the next send interval, so a fist is sent exactly
-once per gesture regardless of frame timing.
-
-**Safety timeout**: if no packet arrives within `COMMAND_TIMEOUT_MS`, the Hub
-resets `pan_target` and `tilt_target` to 0 (re-centers).
-
-**Emergency stop**: pressing any Hub button exits the loop; the Mac sends STOP on
-`q` or on shutdown.
+**Safety timeout**: if no packet arrives within `COMMAND_TIMEOUT_MS` (1000 ms),
+the Hub resets pan/tilt targets to 0.
 
 **BLE deadlock recovery**: the Hub sends a periodic `rdy` heartbeat every
-`RDY_INTERVAL_MS` (200 ms) even when no packet arrives, so a single dropped `rdy`
-does not permanently stall the Mac's `asyncio.Event` wait.
+`RDY_INTERVAL_MS` (200 ms) even when idle, preventing permanent stall from a
+dropped notification.
 
-**Crash resilience**: motor operations inside the Hub loop are wrapped in
-per-block `try/except`, and `main()` is wrapped in a top-level `try/except
-BaseException` that always runs `stop_all()` and shows `X` on the display.
+**Crash resilience**: motor operations are wrapped in per-block `try/except`;
+`main()` is wrapped in `try/except BaseException` that always runs `stop_all()`
+and shows `X` on the Hub display.
 
 ## Motion Constants (Hub)
-
-Values quoted verbatim from the constant block in
-`gesture_bt/hub_pybricks_gesture_server.py`.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
