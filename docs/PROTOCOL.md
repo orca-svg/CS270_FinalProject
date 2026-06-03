@@ -41,10 +41,16 @@ tilt_motor.track_target(TILT_HOME + tilt_offset)
 
 ## Flow Control
 
-The Hub replies with `rdy` at startup and after processing each packet. The Mac
-sender waits for readiness before sending the next packet, can remote-start a
-stopped saved program, and reconnects/rescans after BLE link loss. Recovery
-replay in `balloon_intercept.py` is aim-only; `fire=1` is never replayed.
+The Hub replies with `rdy` at startup, after processing each packet, and via a
+throttled heartbeat while RUNNING. The heartbeat prevents a reconnect deadlock
+where the Hub program stays RUNNING, startup `rdy` is not re-emitted, and the
+Mac waits for readiness before writing stdin.
+
+The Mac sender waits for readiness before sending the next packet, can
+remote-start a stopped saved program, and reconnects/rescans after BLE link
+loss. If the Hub is RUNNING but `rdy` is missing, the Mac sends one harmless
+priming stdin packet and waits for the Hub to emit `rdy` again. Recovery replay
+in `balloon_intercept.py` is aim-only; `fire=1` is never replayed.
 
 Hub status lines include `HOME_CHECK`, `SERVER_VERSION`, `READY`, `ARMED`,
 `FIRE_REQ`, `SPINUP`, `SHOT f=... d=...`, `FIRING`, `RETURNING`, and `FIRED`.

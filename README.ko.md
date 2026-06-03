@@ -125,14 +125,18 @@ pan_motor.track_target(PAN_HOME + pan_offset)
 tilt_motor.track_target(TILT_HOME + tilt_offset)
 ```
 
-Hub는 시작 시점과 각 패킷 처리 후 `rdy`를 보낸다. Mac이 `[Hub] ...`로 출력하는
-상태 라인은 `HOME_CHECK`, `SERVER_VERSION`, `READY`, `ARMED`, `FIRE_REQ`,
-`SPINUP`, `SHOT f=... d=...`, `FIRING`, `RETURNING`, `FIRED`이다.
+Hub는 시작 시점, 각 패킷 처리 후, 그리고 RUNNING 상태의 throttled heartbeat로
+`rdy`를 보낸다. 그래서 BLE 재연결 후에도 Mac의 stdin handshake를 다시 시작할 수
+있다. Hub가 RUNNING인데도 `rdy`가 없으면 Mac은 harmless priming stdin packet을
+한 번 보내고 재시도한다. Mac이 `[Hub] ...`로 출력하는 상태 라인은 `HOME_CHECK`,
+`SERVER_VERSION`, `READY`, `ARMED`, `FIRE_REQ`, `SPINUP`, `SHOT f=... d=...`,
+`FIRING`, `RETURNING`, `FIRED`이다.
 
 > 📖 상세: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 > [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) ·
-> [`docs/PREDICTION.md`](docs/PREDICTION.md)
+> [`docs/PREDICTION.md`](docs/PREDICTION.md) ·
+> [`docs/GITHUB_WORKFLOW.md`](docs/GITHUB_WORKFLOW.md)
 
 ---
 
@@ -296,6 +300,7 @@ python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
 | 첫 연결 실패, 두 번째 성공 | 첫 시도에서 BLE 스캔/연결 불안정 | 기본 3회 재시도로 예상되는 동작. 계속되면 `--connect-attempts`/`--connect-timeout` 상향 |
 | `[BLE] connected`인데 `[READY]` 없음 | Hub 프로그램이 `rdy`를 보내지 않음 | `--auto-start` 기본값 유지, Pybricks Code/SPIKE App 연결 해제, Hub 재부팅 후 재시도 |
 | `[WAIT] Hub not sending rdy` | Hub 프로그램이 아직 시작/응답하지 않음 | `--debug-rx`로 재시도. 수동 중앙 버튼 진단 때만 `--no-auto-start` 사용 |
+| 재연결 후 RUNNING인데 표적 이동이 안 됨 | `rdy` handshake가 재부트스트랩되지 않음 | 현재 코드는 Hub heartbeat `rdy`와 priming stdin을 사용한다. `SERVER_VERSION ..._rdy_heartbeat` 업로드 여부 확인 |
 | Pybricks Code 사용 후 `READY`가 안 보임 | Pybricks Code가 BLE를 점유 중이거나 Hub가 advertising하지 않음 | Pybricks Code 연결 해제, Hub 전원 재시작, Team5 advertising을 기다린 뒤 Mac 스크립트 실행 |
 | `[STALE] Hub is silent` | 링크는 살아있으나 Hub 프로그램 정지/크래시 | 자동 복구가 원격 `START`를 보내게 둔다. 반복되면 Hub 전원 재시작 후 현재 Hub 코드를 다시 업로드 |
 | `[DISCONNECT]` / `[RECONNECT]` | BLE 링크 끊김 | Hub를 가까이·전원 유지; `--no-reconnect`가 아니면 3초마다 재스캔 |

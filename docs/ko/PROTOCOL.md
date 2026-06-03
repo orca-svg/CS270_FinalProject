@@ -41,9 +41,15 @@ tilt_motor.track_target(TILT_HOME + tilt_offset)
 
 ## 흐름 제어
 
-Hub는 시작 시점과 각 패킷 처리 후 `rdy`를 보낸다. Mac 송신기는 다음 패킷을
-보내기 전에 readiness를 기다리고, 저장된 Hub 프로그램이 멈췄으면 원격 START를
-보내며, BLE 링크가 끊기면 재스캔/재연결한다. `balloon_intercept.py`의 복구 replay는
+Hub는 시작 시점, 각 패킷 처리 후, 그리고 RUNNING 상태의 throttled heartbeat로
+`rdy`를 보낸다. 이 heartbeat는 Hub 프로그램이 계속 RUNNING이라 startup `rdy`가
+다시 나오지 않고, Mac은 readiness를 기다리느라 stdin을 쓰지 못하는 reconnect
+deadlock을 막는다.
+
+Mac 송신기는 다음 패킷을 보내기 전에 readiness를 기다리고, 저장된 Hub 프로그램이
+멈췄으면 원격 START를 보내며, BLE 링크가 끊기면 재스캔/재연결한다. Hub가
+RUNNING인데 `rdy`가 없으면 Mac은 harmless priming stdin packet을 한 번 보내고
+Hub가 다시 `rdy`를 출력하기를 기다린다. `balloon_intercept.py`의 복구 replay는
 aim-only이며 `fire=1`은 재전송하지 않는다.
 
 Hub 상태 라인은 `HOME_CHECK`, `SERVER_VERSION`, `READY`, `ARMED`, `FIRE_REQ`,
