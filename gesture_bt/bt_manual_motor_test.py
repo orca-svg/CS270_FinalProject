@@ -15,6 +15,15 @@ from pybricks_ble import PybricksBleSender
 
 
 COMMAND_DELAY = 0.45
+DEFAULT_HOME_PAN = 0
+DEFAULT_HOME_TILT = -100
+
+
+def command_value(text: str) -> int:
+    value = int(text)
+    if value < -100 or value > 100:
+        raise argparse.ArgumentTypeError("must be between -100 and 100")
+    return value
 
 
 async def main() -> None:
@@ -42,6 +51,15 @@ async def main() -> None:
         help="Disable remote START and require starting the Hub program with CENTER.",
     )
     parser.add_argument("--debug-rx", action="store_true", help="Print raw hex of BLE notifications and running-state.")
+    parser.add_argument("--keep-hub-running", action="store_true", help="Disconnect without sending STOP at the end.")
+    parser.add_argument(
+        "--home-only",
+        action="store_true",
+        help="Only send the default HOME pose command repeatedly, without sweep/fire tests.",
+    )
+    parser.add_argument("--home-pan", type=command_value, default=DEFAULT_HOME_PAN, help="Pan value for --home-only, -100..100.")
+    parser.add_argument("--home-tilt", type=command_value, default=DEFAULT_HOME_TILT, help="Tilt value for --home-only, -100..100.")
+    parser.add_argument("--home-seconds", type=float, default=8.0, help="Seconds to hold HOME when --home-only is used.")
     parser.add_argument(
         "--allow-open-loop",
         action="store_true",
@@ -69,7 +87,20 @@ async def main() -> None:
             raise SystemExit("Hub rdy not received; start the saved Hub program and retry.")
 
         print("Starting 4-byte BLE motor test...")
+        home_command = f"M,{args.home_pan},{args.home_tilt},0"
+        if args.home_only:
+            print(f"Holding HOME with {home_command} for {args.home_seconds:.1f}s...")
+            deadline = asyncio.get_running_loop().time() + args.home_seconds
+            while asyncio.get_running_loop().time() < deadline:
+                await hub.send(home_command, timeout=10.0)
+                hub.maybe_warn_stale()
+                await asyncio.sleep(COMMAND_DELAY)
+            print("HOME hold done.")
+            return
+
         commands = (
+            home_command,
+            home_command,
             "M,100,0,0",
             "M,100,0,0",
             "M,100,0,0",
@@ -81,12 +112,12 @@ async def main() -> None:
             "M,0,100,0",
             "M,0,-100,0",
             "M,0,-100,0",
-            "M,0,0,0",
+            home_command,
             "M,0,0,1",
-            "M,0,0,0",
-            "M,0,0,0",
-            "M,0,0,0",
-            "M,0,0,0",
+            home_command,
+            home_command,
+            home_command,
+            home_command,
             "STOP",
         )
         for cmd in commands:
@@ -96,7 +127,7 @@ async def main() -> None:
 
         print("Manual motor test done.")
     finally:
-        await hub.close(send_stop=False)
+        await hub.close(send_stop=not args.keep_hub_running)
 
 
 if __name__ == "__main__":

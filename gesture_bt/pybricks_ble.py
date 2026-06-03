@@ -80,6 +80,9 @@ class PybricksBleSender:
         self.connected = False
         self.print_sends = False
         self.debug_rx = False
+        # Optional callback invoked with each complete Hub stdout line. Lets
+        # callers (e.g. dataset loggers) react to Hub messages like "SHOT ...".
+        self.line_handler = None
 
         self._rx_debug_count = 0
         self._program_running: Optional[bool] = None
@@ -92,11 +95,13 @@ class PybricksBleSender:
         self._connect_time = 0.0
         self._rx_text_buffer = ""
         self._reconnecting = False
+        self._connecting = False
         self._stale_warned = False
         self._closing = False
         self._loop = None
         self._last_start_attempt = 0.0
         self._start_cooldown = 1.5
+        self.recovery_generation = 0
 
     async def _find_device(self):
         print(f"[SCAN] name='{self.hub_name}' timeout={self.scan_timeout:.1f}s")
@@ -168,15 +173,32 @@ class PybricksBleSender:
         self._loop = asyncio.get_running_loop()
 
         def handle_disconnect(_client):
+            was_connecting = self._connecting
             self.connected = False
             self.ready.clear()
             print(f"\n[DISCONNECT] up={time.time() - self._connect_time:.1f}s last_hub_rx={time.time() - self.last_rx:.1f}s")
+            if was_connecting:
+                return
             if self.reconnect and not self._closing and not self._reconnecting and self._loop and self._loop.is_running():
                 self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect_loop()))
 
         self.client = BleakClient(device, disconnected_callback=handle_disconnect, timeout=self.connect_timeout)
+        self._connecting = True
         try:
             await self.client.connect()
+            self._rx_text_buffer = ""
+            self.ready.clear()
+            self._program_running = None
+            self._stdout_seen = False
+            self._open_loop = False
+            self._stale_warned = False
+            self.connected = True
+            self.recovery_generation += 1
+            self._connect_time = time.time()
+            self.last_rx = self._connect_time
+            print(f"[BLE] connected to {device.name or '(unknown)'}")
+            await self.client.start_notify(PYBRICKS_COMMAND_EVENT_CHAR_UUID, self._handle_rx)
+            print("[NOTIFY] started.")
         except Exception:
             failed_client = self.client
             with contextlib.suppress(Exception):
@@ -185,18 +207,8 @@ class PybricksBleSender:
             self.connected = False
             self.ready.clear()
             raise
-        self._rx_text_buffer = ""
-        self.ready.clear()
-        self._program_running = None
-        self._stdout_seen = False
-        self._open_loop = False
-        self._stale_warned = False
-        self.connected = True
-        self._connect_time = time.time()
-        self.last_rx = self._connect_time
-        print(f"[BLE] connected to {device.name or '(unknown)'}")
-        await self.client.start_notify(PYBRICKS_COMMAND_EVENT_CHAR_UUID, self._handle_rx)
-        print("[NOTIFY] started.")
+        finally:
+            self._connecting = False
         if self.auto_start:
             await self._start_user_program()
 
@@ -223,6 +235,17 @@ class PybricksBleSender:
         except Exception as exc:
             print(f"[START] could not auto-start the saved program ({exc}). Press the Hub center button to start it manually.")
 
+    async def _stop_user_program(self) -> None:
+        """Remote-stop the saved Hub program without using Hub stdin."""
+        if not self.client or not self.connected:
+            return
+        await self.client.write_gatt_char(
+            PYBRICKS_COMMAND_EVENT_CHAR_UUID,
+            bytes([PYBRICKS_CMD_STOP_USER_PROGRAM]),
+            response=True,
+        )
+        print("[STOP] sent remote STOP command to Hub.")
+
     async def _reconnect_loop(self) -> None:
         self._reconnecting = True
         attempt = 0
@@ -241,12 +264,40 @@ class PybricksBleSender:
                     await asyncio.wait_for(self.ready.wait(), timeout=2.0)
                     print("[READY] reconnect rdy received; Hub program resumed.")
                 except asyncio.TimeoutError:
-                    print("[WAIT] BLE reconnected, but Hub rdy is missing. Press the Hub center button if the saved program stopped.")
+                    print("[WAIT] BLE reconnected, but Hub rdy is missing. Retrying remote START once.")
+                    await self._start_user_program()
+                    try:
+                        await asyncio.wait_for(self.ready.wait(), timeout=3.0)
+                        print("[READY] reconnect rdy received after START retry.")
+                    except asyncio.TimeoutError:
+                        print("[RECONNECT] rdy still missing; disconnecting and retrying scan.")
+                        with contextlib.suppress(Exception):
+                            await self.client.disconnect()
+                        self.connected = False
+                        self.ready.clear()
+                        await asyncio.sleep(2.0)
                 except Exception as exc:
                     print(f"[RECONNECT] error: {exc}. Retrying in 3s.")
                     await asyncio.sleep(3.0)
         finally:
             self._reconnecting = False
+
+    async def _wait_for_connected(self, timeout: float) -> bool:
+        if self.connected and self.client:
+            return True
+        if not self.reconnect or self._closing:
+            return False
+
+        self._loop = asyncio.get_running_loop()
+        if not self._reconnecting:
+            self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect_loop()))
+
+        deadline = self._loop.time() + timeout
+        while self._loop.time() < deadline:
+            if self.connected and self.client:
+                return True
+            await asyncio.sleep(0.1)
+        return bool(self.connected and self.client)
 
     def _handle_rx(self, _, data: bytearray) -> None:
         if not data:
@@ -297,6 +348,11 @@ class PybricksBleSender:
             line = line.strip()
             if line:
                 print(f"[Hub] {line}")
+                if self.line_handler is not None:
+                    try:
+                        self.line_handler(line)
+                    except Exception as exc:
+                        print(f"[Hub] line_handler error: {exc}")
 
     async def resume_if_stopped(self, timeout: float = 4.0) -> bool:
         if self._program_running is not False:
@@ -315,6 +371,7 @@ class PybricksBleSender:
         try:
             await asyncio.wait_for(self.ready.wait(), timeout=timeout)
             print("[RECOVER] rdy received after restart.")
+            self.recovery_generation += 1
             return True
         except asyncio.TimeoutError:
             print("[RECOVER] remote START sent, but no rdy arrived yet.")
@@ -378,8 +435,9 @@ class PybricksBleSender:
 
     async def send(self, command: str, timeout: float = 1.0) -> bool:
         if not self.client or not self.connected:
-            print(f"[BLE] not connected; skipped {command.strip()!r}")
-            return False
+            if not await self._wait_for_connected(timeout=max(2.0, timeout)):
+                print(f"[BLE] not connected; skipped {command.strip()!r}")
+                return False
 
         command_name = command.strip().upper()
         if self._program_running is False and command_name != "STOP":
@@ -392,6 +450,9 @@ class PybricksBleSender:
                 await asyncio.wait_for(self.ready.wait(), timeout=timeout)
                 self.ready.clear()
             except asyncio.TimeoutError:
+                if self._program_running is False and command_name != "STOP":
+                    if await self.resume_if_stopped(timeout=max(2.0, timeout)):
+                        return await self.send(command, timeout=timeout)
                 if self.allow_open_loop and self._program_running and not self._stdout_seen:
                     self._open_loop = True
                     print("[OPEN-LOOP] Hub program is RUNNING but no rdy is arriving; switching to open-loop sending.")
@@ -412,13 +473,33 @@ class PybricksBleSender:
             print(f"[SEND] {command.strip()} -> {packet!r}")
 
         try:
-            await self.client.write_gatt_char(
-                PYBRICKS_COMMAND_EVENT_CHAR_UUID,
-                b"\x06" + packet,
-                response=True,
+            await asyncio.wait_for(
+                self.client.write_gatt_char(
+                    PYBRICKS_COMMAND_EVENT_CHAR_UUID,
+                    b"\x06" + packet,
+                    response=True,
+                ),
+                timeout=max(0.5, timeout),
             )
             self._ever_sent_stdin = True
             return True
+        except asyncio.CancelledError:
+            client_is_connected = bool(self.connected and self.client and getattr(self.client, "is_connected", False))
+            if client_is_connected:
+                raise
+            print("[BLE] write cancelled after disconnect; reconnecting.")
+            self.connected = False
+            self.ready.clear()
+            if self.reconnect and not self._closing and not self._reconnecting and self._loop and self._loop.is_running():
+                self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect_loop()))
+            return False
+        except asyncio.TimeoutError:
+            print(f"[BLE] write timed out after {timeout:.1f}s; reconnecting.")
+            self.connected = False
+            self.ready.clear()
+            if self.reconnect and not self._closing and not self._reconnecting and self._loop and self._loop.is_running():
+                self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect_loop()))
+            return False
         except Exception as exc:
             print(f"[BLE] write failed: {exc}")
             self.connected = False
@@ -446,7 +527,7 @@ class PybricksBleSender:
             return
         if send_stop and self.connected:
             with contextlib.suppress(Exception):
-                await self.send("STOP", timeout=1.0)
+                await self._stop_user_program()
         with contextlib.suppress(Exception):
             await self.client.disconnect()
 

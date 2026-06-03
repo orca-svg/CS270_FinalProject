@@ -29,12 +29,11 @@ pip install -r requirements_gesture_bt.txt
 
 **그다음:** [Pybricks Code](https://code.pybricks.com)에서
 `hub_pybricks_gesture_server.py`를 Hub에 저장하고, Mac 스크립트를 실행하기 전
-Pybricks Code/SPIKE App 연결을 해제한다. Mac 측 도구는 2026-06-03 Team5에서
-검증한 방식대로 Pybricks 원격 `START`만 자동 전송한다. 실행 도중 Hub 프로그램이
-멈추면 Mac이 `START`를 다시 보내고 다음 `rdy`에 재동기화하므로 재시작 없이 복구된다.
-BLE 연결은 자동 재시도된다(`--connect-attempts`, 기본 3). 첫 스캔이 불안정하면
-`--connect-attempts`/`--connect-timeout`를 올린다. Hub 중앙 버튼으로 직접 시작하고
-싶을 때만 `--no-auto-start`를 사용한다.
+Pybricks Code/SPIKE App 연결을 해제한다. Mac 측 도구는 Pybricks 원격 `START`를
+자동 전송한다. 실행 도중 Hub 프로그램이 멈추면 Mac이 `START`를 다시 보내고 다음
+`rdy`에 재동기화한 뒤 이어서 진행한다. BLE 연결은 자동 재시도된다.
+`balloon_intercept.py`의 기본값은 `--connect-attempts 5`, `--scan-timeout 20`이다.
+Hub 중앙 버튼으로 직접 시작하는 진단 때만 `--no-auto-start`를 사용한다.
 
 ## 🧭 어떤 스크립트를 실행하나?
 
@@ -69,6 +68,9 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 gesture_bt/
   pybricks_ble.py                # 공유 BLE 스캔 / 재연결 / readiness / 진단
   bt_manual_motor_test.py        # 카메라 없이 BLE + 모터 경로 테스트
+  bt_verify_restart_shot.py      # 발사 + 강제 재시작 검증
+  camera_check.py                # macOS/OpenCV 카메라 권한 확인
+  hub_angle_reader.py            # 홈 캘리브레이션용 D/F/C 절대 각도 읽기
   gesture_bt_controller.py       # 손 제스처 컨트롤러
   balloon_intercept.py           # HSV 탐지 + 포물선 예측 + 자동 발사
   hub_pybricks_gesture_server.py # Hub 측 BLE 서버 + 모터 상태 머신
@@ -79,6 +81,7 @@ docs/                            # 심화 기술 문서 (영문 + ko/)
 ```
 
 MediaPipe hand-landmarker 모델은 최초 실행 시 다운로드되며 Git에서 무시된다.
+발사 캘리브레이션 중 생성되는 `gesture_bt/aim_dataset.csv`도 Git에서 무시된다.
 로컬 하네스 파일, 가상환경, 다른 사이드 프로젝트도 무시하여 팀원/교수/TA가 보는
 GitHub 저장소를 실행 코드와 문서 중심으로 유지한다.
 
@@ -104,22 +107,27 @@ Mac은 Pybricks command/event characteristic에 선행 `0x06`을 붙여 쓴다. 
 
 | Byte | Field | 의미 |
 |:----:|-------|------|
-| 0 | opcode | `M` = 이동/발사, `S` = 정지 후 종료 |
+| 0 | opcode | `M` = 이동/발사. Hub 정지는 Pybricks 원격 `STOP` 사용; stdin `S`는 legacy 용도 |
 | 1 | `pan_err_i8` | signed pan 오차 `[-100, 100]`, `value & 0xFF`로 인코딩 |
 | 2 | `tilt_err_i8` | signed tilt 오차 `[-100, 100]`, `value & 0xFF`로 인코딩 |
 | 3 | `fire` | `1`이면 발사 1회 래치, 평소 `0` |
 
-현재 Hub runner는 signed 명령값을 절대 목표 각도로 직접 변환한다:
+현재 Hub runner는 `reset_angle()`을 호출하지 않는다. 대신 Team5 로봇에서 측정한
+절대 홈 기준값을 사용한다: F 포트 `PAN_HOME=-172`, D 포트 `TILT_HOME=-20`,
+C 포트 `C_HOME=43`. Mac의 signed 명령은 카메라 offset으로 변환한 뒤
+`HOME + offset`으로 적용한다:
 
 ```python
-pan_target  = clamp(pan_val / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
-tilt_target = clamp((tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
+pan_offset  = clamp(pan_val / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
+tilt_offset = clamp((tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
                     TILT_MIN, TILT_MAX)
+pan_motor.track_target(PAN_HOME + pan_offset)
+tilt_motor.track_target(TILT_HOME + tilt_offset)
 ```
 
-Hub는 패킷마다 `rdy`를 보내고(유실 notification 대비 200 ms 하트비트 포함),
-Mac이 `[Hub] ...`로 출력하는 상태 라인을 전송한다: `READY`, `ARMED`, `FIRING`,
-`RETURNING`, `FIRED`.
+Hub는 시작 시점과 각 패킷 처리 후 `rdy`를 보낸다. Mac이 `[Hub] ...`로 출력하는
+상태 라인은 `HOME_CHECK`, `SERVER_VERSION`, `READY`, `ARMED`, `FIRE_REQ`,
+`SPINUP`, `SHOT f=... d=...`, `FIRING`, `RETURNING`, `FIRED`이다.
 
 > 📖 상세: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
@@ -146,7 +154,15 @@ python bt_manual_motor_test.py --hub-name "Team5" --print-sends
 [READY] rdy received.
 [SEND] M,100,0,0 -> b'M\x64\x00\x00'
 [SEND] M,0,0,1   -> b'M\x00\x00\x01'
-[Hub] FIRING → RETURNING → ARMED → FIRED
+[Hub] FIRE_REQ → SPINUP → SHOT f=... d=... → FIRING → RETURNING → ARMED → FIRED
+```
+
+홈 위치만 확인:
+
+```bash
+python bt_manual_motor_test.py --hub-name "Team5" --print-sends --debug-rx \
+  --connect-attempts 5 --connect-timeout 60 \
+  --home-only --home-seconds 6 --home-pan 0 --home-tilt -100
 ```
 
 ### 2. 손 제스처 제어
@@ -169,19 +185,42 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 ```
 
 HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수직 가속도로 미래
-탄착점을 예측하며, 예측점이 화면 중심 lock window에 들어오면 자동 발사한다.
+탄착점을 예측한다. 자동 발사는 한 표적 1발 상태기계로 동작한다:
+`TRACKING -> LOCKED -> FIRED_FOR_TARGET -> REARM_WAIT`. 예측점이 lock window 안에
+`--fire-confirm-frames` 프레임 연속 들어올 때만 `fire=1`을 보내며, 발사 후 같은
+연속 표적에는 `--target-lost-rearm`초 동안 사라지기 전까지 조준 명령만 보낸다.
 
 | 옵션 | 목적 |
 |------|------|
 | `--flight-time` | 포물선 예측에 쓰는 발사체 도달 예상 시간 |
 | `--fire-px` | 화면 중심 lock window 픽셀 크기 |
+| `--fire-confirm-frames` | 발사 전 lock window 안에 연속으로 들어와야 하는 프레임 수(기본 `2`) |
+| `--target-lost-rearm` | 다음 발사를 허용하기 위해 표적이 사라져야 하는 시간(기본 `0.5`) |
+| `--no-fire` | `fire=1` 없이 추적/조준만 수행 |
 | `--min-area` | 빨간 contour 최소 면적 |
 | `--send-interval` | BLE 명령 최소 전송 간격 |
+| `--post-recovery-replay` | BLE/Hub 복구 직후 aim-only replay 시간; `fire=1`은 재전송하지 않음 |
+| `--dataset` / `--no-dataset` | `SHOT`과 결합한 캘리브레이션 row를 `aim_dataset.csv`에 저장/비활성화 |
 | `--camera`, `--width`, `--height` | 카메라 인덱스와 프레임 크기 |
 | `--no-auto-start` | Mac 측 원격 START 비활성화 |
 | `--connect-timeout` | BLE 연결 타임아웃(초, 기본 `45`) |
-| `--connect-attempts` | 포기 전 BLE 스캔/연결 재시도 횟수(기본 `3`) |
+| `--connect-attempts` | 포기 전 BLE 스캔/연결 재시도 횟수(기본 `5`) |
 | `--keep-hub-running` | 카메라 스크립트 종료 후에도 Hub 프로그램 유지(기본은 `STOP` 전송으로 재실행 준비) |
+
+### 4. 발사와 재연결 검증
+
+```bash
+# 단발 발사 검증
+python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
+  --connect-attempts 5 --connect-timeout 60 --shot-timeout 10 --skip-forced-stop
+
+# 강제 STOP 후 자동 복구 + 발사 검증
+python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
+  --connect-attempts 5 --connect-timeout 60 --shot-timeout 10
+```
+
+통과 로그에는 `SERVER_VERSION gesture_server_2026_06_03_fire_spinup_state`,
+`SHOT f=... d=...`, `RETURNING`, `ARMED`, `FIRED`가 포함된다.
 
 ---
 
@@ -202,15 +241,18 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 | 모듈 | 상태 | 담당 |
 |------|:----:|:----:|
 | Pybricks BLE 직결 아키텍처 | ✅ | P2 |
-| 4바이트 프로토콜 + `rdy` 흐름 제어 + 하트비트 | ✅ | P2 |
+| 4바이트 프로토콜 + `rdy` 흐름 제어 | ✅ | P2 |
 | Hub 파서 자가 복구 + stdin flush | ✅ | P2 |
-| Hub 크래시 가시화 (`ERR_*`, `FATAL`, `BTN_STOP`) | ✅ | P2 |
+| Hub 절대 홈 캘리브레이션 (`F=-172`, `D=-20`, `C=43`) | ✅ | P2 · P5 |
 | 수동 BLE 모터 테스트 | ✅ | P2 |
 | 손 제스처 제어 + 주먹 발사 래치 | ✅ | P3 · P2 |
 | 풍선/표적 HSV 요격 + 포물선 예측 | ✅ | P3 · P4 |
+| 한 표적 1발 자동 발사 FSM | ✅ | P2 · P4 |
 | Mac 측 원격 START + `rdy` 흐름 제어 | ✅ | P2 |
+| 재연결 replay 보호: aim-only, `fire=1` 재전송 없음 | ✅ | P2 |
+| `SHOT f/d` 기반 발사 캘리브레이션 데이터 로깅 | ✅ | P5 |
 | 팀 역할 + README 대시보드 + 문서 | ✅ | P5 |
-| 카메라-포탑 캘리브레이션 루틴 | 🔜 | P5 · P2 |
+| 카메라-포탑 캘리브레이션 회귀 | 🔜 | P5 · P2 |
 | 결정적 녹화 영상 리플레이 하네스 | 🔜 | P5 |
 | 표적 강건성 (면적 게이트, 연속 추적, 소실 복구) | ⬜ | P3 |
 | 체공 시간 + 지연 캘리브레이션 | ⬜ | P4 · P5 |
@@ -221,7 +263,7 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 
 | # | 항목 | 담당 | 중요한 이유 | 기기? |
 |:-:|------|:----:|------------|:----:|
-| 1 | **카메라-포탑 캘리브레이션** | P5 · P2 | 오차 기반 조향은 동작하지만, 반복 가능한 요격에는 측정 기반 픽셀→각도 mapping과 sign/gain 확인이 필요하다. 정확도를 가장 크게 좌우한다. | 🔴 예 |
+| 1 | **카메라-포탑 캘리브레이션 회귀** | P5 · P2 | 이제 `SHOT f/d` row가 기록된다. 다음 단계는 충분한 샘플을 모아 픽셀→각도 보정식을 맞추는 것이다. 정확도를 가장 크게 좌우한다. | 🔴 예 |
 | 2 | **녹화 영상 리플레이 하네스** | P5 | 결정적 클립 리플레이 모드를 추가하면 P3/P4가 동일 입력에서 감지/예측 변경을 비교할 수 있다. | 🟢 아니오 |
 | 3 | **표적 강건성** | P3 | 최소/최대 면적 게이팅, 프레임 간 연속성, 소실 복구로 false lock과 오발을 줄인다. | 🟢 아니오 |
 | 4 | **체공 시간 / 지연 캘리브레이션** | P4 · P5 | BLE + 처리 + 발사체 지연이 올바른 리드를 결정한다. 측정하여 예측기에 반영한다. | 🔴 예 |
@@ -253,8 +295,9 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 | 실행 도중 멈췄다가 다시 진행 | Hub 프로그램 종료 후 Mac이 자동 복구 | 정상 동작: Mac이 `START` 재전송(`[RECOVER] ... sending remote START`) 후 다음 `rdy`에 재개 |
 | 첫 연결 실패, 두 번째 성공 | 첫 시도에서 BLE 스캔/연결 불안정 | 기본 3회 재시도로 예상되는 동작. 계속되면 `--connect-attempts`/`--connect-timeout` 상향 |
 | `[BLE] connected`인데 `[READY]` 없음 | Hub 프로그램이 `rdy`를 보내지 않음 | `--auto-start` 기본값 유지, Pybricks Code/SPIKE App 연결 해제, Hub 재부팅 후 재시도 |
-| `[WAIT] Hub not sending rdy` | readiness 하트비트 아직 없음 | `--debug-rx`로 재시도. 수동 중앙 버튼 진단 때만 `--no-auto-start` 사용 |
-| `[STALE] Hub is silent` | 링크는 살아있으나 Hub 프로그램 정지/크래시 | Hub 프로그램 재시작; `[Hub] FATAL...` 확인 |
+| `[WAIT] Hub not sending rdy` | Hub 프로그램이 아직 시작/응답하지 않음 | `--debug-rx`로 재시도. 수동 중앙 버튼 진단 때만 `--no-auto-start` 사용 |
+| Pybricks Code 사용 후 `READY`가 안 보임 | Pybricks Code가 BLE를 점유 중이거나 Hub가 advertising하지 않음 | Pybricks Code 연결 해제, Hub 전원 재시작, Team5 advertising을 기다린 뒤 Mac 스크립트 실행 |
+| `[STALE] Hub is silent` | 링크는 살아있으나 Hub 프로그램 정지/크래시 | 자동 복구가 원격 `START`를 보내게 둔다. 반복되면 Hub 전원 재시작 후 현재 Hub 코드를 다시 업로드 |
 | `[DISCONNECT]` / `[RECONNECT]` | BLE 링크 끊김 | Hub를 가까이·전원 유지; `--no-reconnect`가 아니면 3초마다 재스캔 |
 | 모터가 반대쪽을 가리킴 | 카메라-모터 매핑 불일치 | Mac의 `pixel_to_motor_vals()`와 Hub의 `PAN_MIN/PAN_MAX`, `TILT_MIN/TILT_MAX` 확인 |
 | 모터 범위가 너무 작거나 큼 | 각도 범위 불일치 | `hub_pybricks_gesture_server.py`의 `PAN_MIN/PAN_MAX`, `TILT_MIN/TILT_MAX` 조정 |
@@ -262,6 +305,7 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 
 ---
 
-*2026-06-03 Team5 Hub에서 Mac 측 원격 START 경로로 검증. 방향: Pybricks BLE
-직결 제어. 저장소 범위: `gesture_bt/`, `docs/`, `README*.md`. 가상환경,
-bytecode cache, local log, MediaPipe `.task` 모델은 업로드하지 않음.*
+*2026-06-03 Team5 Hub에서 Mac 측 원격 START, 강제 STOP 복구, 단발 발사 로그로
+검증. 방향: Pybricks BLE 직결 제어. 저장소 범위: `gesture_bt/`, `docs/`,
+`README*.md`. 가상환경, bytecode cache, local log, generated dataset,
+MediaPipe `.task` 모델은 업로드하지 않음.*

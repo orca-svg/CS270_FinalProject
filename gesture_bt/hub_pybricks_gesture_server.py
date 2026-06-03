@@ -9,13 +9,17 @@ from usys import stdin, stdout
 from uselect import poll
 
 hub = PrimeHub()
+SERVER_VERSION = "gesture_server_2026_06_03_fire_spinup_state"
 
 
 def write_line(text):
     try:
-        stdout.buffer.write(text.encode("utf-8") + b"\n")
+        stdout.write(text + "\n")
     except Exception:
-        pass
+        try:
+            stdout.buffer.write((text + "\n").encode("utf-8"))
+        except Exception:
+            pass
 
 
 def safe_motor(port, label):
@@ -39,15 +43,28 @@ PAN_MAX = 35
 TILT_MIN = 0
 TILT_MAX = 80
 COMMAND_TIMEOUT_MS = 1000
-RDY_INTERVAL_MS = 200
+DEBUG_CMD_LINES = False
 
-C_FIRE_ANGLE = 170
-C_FIRE_DC = 80
-C_RETURN_DC = 50
+# Absolute home references: the motor.angle() readings at the calibrated home
+# pose. We do NOT reset_angle, so these absolute-encoder values are reported
+# identically after every (re)start. Camera offsets are applied on top, so the
+# turret aims at a fixed world point even when the program restarts on a
+# reconnect AND the SHOT calibration angles stay consistent across sessions.
+# Verify/recalibrate against the "HOME_CHECK" line on a fresh start.
+PAN_HOME = -172   # Port F (pan) at pan center -> camera offset 0
+TILT_HOME = -20   # Port D (tilt) at tilt bottom (tilt 0 deg)
+C_HOME = 43       # Port C (trigger) armed/rest position
+
+C_FIRE_TRAVEL = 170   # degrees the C trigger rotates per shot (relative to arm)
+C_FIRE_DC = 55
+C_RETURN_DC = 45
 C_TOLERANCE = 3
+C_LAUNCH_SPINUP_MS = 350
+C_FIRE_TIMEOUT_MS = 1300
+C_RETURN_TIMEOUT_MS = 1300
 
-LAUNCH_PWM_A = 100
-LAUNCH_PWM_B = -100
+LAUNCH_PWM_A = 75
+LAUNCH_PWM_B = -75
 SPIN_LAUNCH_ON_START = False
 
 keyboard = poll()
@@ -86,57 +103,119 @@ def motor_angle(motor):
 
 
 def start_launcher_wheels():
+    ok = True
     if launch_l:
-        launch_l.dc(LAUNCH_PWM_A)
+        try:
+            launch_l.dc(LAUNCH_PWM_A)
+        except Exception:
+            write_line("LAUNCH_A_DC_ERR")
+            ok = False
+    else:
+        write_line("LAUNCH_A_MISSING")
+        ok = False
     if launch_r:
-        launch_r.dc(LAUNCH_PWM_B)
+        try:
+            launch_r.dc(LAUNCH_PWM_B)
+        except Exception:
+            write_line("LAUNCH_B_DC_ERR")
+            ok = False
+    else:
+        write_line("LAUNCH_B_MISSING")
+        ok = False
+    return ok
+
+
+def stop_launcher_wheels():
+    for motor in (launch_l, launch_r):
+        if motor:
+            try:
+                motor.stop()
+            except Exception:
+                pass
 
 
 c_state = "armed"
+c_state_started_ms = 0
+FIRE_NONE = 0
+FIRE_CONSUMED = 1
+FIRE_DONE = 2
 
 
 def c_update(can_fire):
-    global c_state
+    global c_state, c_state_started_ms
     if c_motor is None:
-        return False
+        return FIRE_NONE
 
     now = c_motor.angle()
+    elapsed = watch.time() - c_state_started_ms
 
     if c_state == "armed":
         if can_fire:
+            write_line("FIRE_REQ")
             start_launcher_wheels()
-            c_motor.dc(C_FIRE_DC)
+            c_state = "spinup"
+            c_state_started_ms = watch.time()
+            write_line("SPINUP")
+            return FIRE_CONSUMED
+    elif c_state == "spinup":
+        if elapsed >= C_LAUNCH_SPINUP_MS:
+            try:
+                c_motor.dc(C_FIRE_DC)
+            except Exception:
+                write_line("C_FIRE_DC_ERR")
+                stop_launcher_wheels()
+                c_state = "armed"
+                return FIRE_CONSUMED
             c_state = "firing"
+            c_state_started_ms = watch.time()
+            # Report the actual pan(F)/tilt(D) motor angles at the moment of
+            # firing so the Mac side can log a calibration dataset row.
+            write_line(
+                "SHOT f=" + motor_angle(pan_motor) + " d=" + motor_angle(tilt_motor)
+            )
             write_line("FIRING")
+            return FIRE_CONSUMED
     elif c_state == "firing":
-        if now >= C_FIRE_ANGLE - C_TOLERANCE:
-            c_motor.dc(-C_RETURN_DC)
+        if now >= C_HOME + C_FIRE_TRAVEL - C_TOLERANCE or elapsed >= C_FIRE_TIMEOUT_MS:
+            try:
+                c_motor.dc(-C_RETURN_DC)
+            except Exception:
+                write_line("C_RETURN_DC_ERR")
+                c_motor.stop()
+                c_state = "armed"
+                return FIRE_DONE
             c_state = "returning"
+            c_state_started_ms = watch.time()
             write_line("RETURNING")
     elif c_state == "returning":
-        if now <= C_TOLERANCE:
+        if now <= C_HOME + C_TOLERANCE or elapsed >= C_RETURN_TIMEOUT_MS:
             c_motor.stop()
-            if not SPIN_LAUNCH_ON_START:
-                if launch_l:
-                    launch_l.stop()
-                if launch_r:
-                    launch_r.stop()
+            stop_launcher_wheels()
             c_state = "armed"
             write_line("ARMED")
-            return True
+            return FIRE_DONE
 
-    return False
+    return FIRE_NONE
 
 
 def main():
     stop_all()
 
-    if pan_motor:
-        pan_motor.reset_angle(0)
-    if tilt_motor:
-        tilt_motor.reset_angle(0)
-    if c_motor:
-        c_motor.reset_angle(0)
+    # Do NOT reset_angle. Resetting would redefine "0" at wherever the turret
+    # physically sits at each (re)start, so after a reconnect-triggered restart
+    # the camera offsets would drift AND the SHOT calibration angles would be
+    # inconsistent between sessions. Keep absolute encoder readings and aim at
+    # HOME + camera offset. HOME_CHECK reports the live angles so PAN_HOME/
+    # TILT_HOME/C_HOME can be verified or recalibrated against the boot pose.
+    write_line(
+        "HOME_CHECK pan_angle=" + motor_angle(pan_motor)
+        + " tilt_angle=" + motor_angle(tilt_motor)
+        + " c_angle=" + motor_angle(c_motor)
+        + " (expected pan=" + str(PAN_HOME)
+        + " tilt=" + str(TILT_HOME)
+        + " c=" + str(C_HOME) + ")"
+    )
+    write_line("SERVER_VERSION " + SERVER_VERSION)
 
     if SPIN_LAUNCH_ON_START:
         start_launcher_wheels()
@@ -152,11 +231,16 @@ def main():
     except Exception:
         pass
 
+    # pan_target / tilt_target are camera offsets (deg) relative to HOME, NOT
+    # absolute motor angles. The absolute track target is HOME + offset.
     pan_target = 0.0
     tilt_target = 0.0
+    # Hold position until the first camera command arrives. On a reconnect this
+    # stops the turret from snapping back to HOME first; it moves directly to
+    # the world position the camera asks for.
+    have_target = False
     can_fire = False
     last_cmd_ms = watch.time()
-    last_rdy_ms = watch.time()
     running = True
 
     while running:
@@ -174,52 +258,52 @@ def main():
                         TILT_MIN,
                         TILT_MAX,
                     )
-                    if fire == 1:
+                    if fire == 1 and c_state == "armed":
                         can_fire = True
+                    have_target = True
                     last_cmd_ms = watch.time()
-                    write_line(
-                        "CMD pan_val="
-                        + str(pan_val)
-                        + " tilt_val="
-                        + str(tilt_val)
-                        + " pan_target="
-                        + str(int(pan_target))
-                        + " tilt_target="
-                        + str(int(tilt_target))
-                        + " pan_angle="
-                        + motor_angle(pan_motor)
-                        + " tilt_angle="
-                        + motor_angle(tilt_motor)
-                    )
-                elif opcode == ord("S"):
-                    running = False
+                    if DEBUG_CMD_LINES:
+                        write_line(
+                            "CMD pan_val="
+                            + str(pan_val)
+                            + " tilt_val="
+                            + str(tilt_val)
+                            + " pan_abs="
+                            + str(int(PAN_HOME + pan_target))
+                            + " tilt_abs="
+                            + str(int(TILT_HOME + tilt_target))
+                            + " pan_angle="
+                            + motor_angle(pan_motor)
+                            + " tilt_angle="
+                            + motor_angle(tilt_motor)
+                        )
+                # Do not stop on stdin packets. The Mac side uses the
+                # Pybricks remote STOP command when it intentionally exits.
+                # Treating any stdin payload as STOP can terminate the Hub
+                # program if BLE stdin framing is ever offset by a byte.
             try:
                 stdout.buffer.write(b"rdy")
-                last_rdy_ms = watch.time()
-            except Exception:
-                pass
-        elif watch.time() - last_rdy_ms >= RDY_INTERVAL_MS:
-            try:
-                stdout.buffer.write(b"rdy")
-                last_rdy_ms = watch.time()
             except Exception:
                 pass
 
         try:
-            if pan_motor:
-                pan_motor.track_target(int(pan_target))
-            if tilt_motor:
-                tilt_motor.track_target(int(tilt_target))
+            if have_target:
+                if pan_motor:
+                    pan_motor.track_target(int(PAN_HOME + pan_target))
+                if tilt_motor:
+                    tilt_motor.track_target(int(TILT_HOME + tilt_target))
         except Exception:
             pass
 
         try:
-            shot_fired = c_update(can_fire)
-            if shot_fired:
-                write_line("FIRED")
+            fire_result = c_update(can_fire)
+            if fire_result != FIRE_NONE:
                 can_fire = False
+            if fire_result == FIRE_DONE:
+                write_line("FIRED")
         except Exception:
-            pass
+            write_line("C_UPDATE_ERR")
+            can_fire = False
 
         if watch.time() - last_cmd_ms > COMMAND_TIMEOUT_MS:
             pan_target = 0.0
@@ -233,6 +317,7 @@ def main():
 
 try:
     main()
-except BaseException:
+except Exception as exc:
+    write_line("HUB_EXCEPTION " + str(exc))
     stop_all()
     hub.display.text("X")

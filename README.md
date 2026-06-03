@@ -30,13 +30,11 @@ pip install -r requirements_gesture_bt.txt
 **Then:** in [Pybricks Code](https://code.pybricks.com), upload
 `hub_pybricks_gesture_server.py`, save it on the Hub, and disconnect Pybricks
 Code/SPIKE App before running the Mac script. The Mac-side tools send a
-Pybricks remote `START` command automatically, using the Team5 connection path
-verified on 2026-06-03. If the Hub program stops mid-session, the Mac re-sends
-`START` and re-syncs on the next `rdy`, so the run recovers without a restart.
-BLE connection is retried automatically (`--connect-attempts`, default 3); raise
-`--connect-attempts`/`--connect-timeout` if the first scan is flaky. Use
-`--no-auto-start` only if you want to start the Hub program manually with the
-center button.
+Pybricks remote `START` command automatically. If the Hub program stops
+mid-session, the Mac re-sends `START`, waits for the next `rdy`, and resumes.
+BLE connection is retried automatically; `balloon_intercept.py` defaults to
+`--connect-attempts 5` and `--scan-timeout 20`. Use `--no-auto-start` only for
+manual center-button diagnostics.
 
 ## 🧭 Which script do I run?
 
@@ -71,6 +69,9 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 gesture_bt/
   pybricks_ble.py                # Shared BLE scan / reconnect / readiness / diagnostics
   bt_manual_motor_test.py        # BLE + motor path test (no camera)
+  bt_verify_restart_shot.py      # Fire + forced-restart verification
+  camera_check.py                # macOS/OpenCV camera permission check
+  hub_angle_reader.py            # Read D/F/C absolute motor angles for home calibration
   gesture_bt_controller.py       # Hand-gesture controller
   balloon_intercept.py           # HSV detection + parabolic prediction + auto-fire
   hub_pybricks_gesture_server.py # Hub-side BLE server + motor state machine
@@ -81,8 +82,10 @@ docs/                            # Deep-dive technical docs (EN + ko/)
 ```
 
 The MediaPipe hand-landmarker model downloads on first run and is Git-ignored.
-Local harness files, virtualenvs, and other side projects are ignored too, so
-the GitHub repo stays focused for teammates, instructors, and TAs.
+`gesture_bt/aim_dataset.csv` is generated during fire calibration and is also
+Git-ignored. Local harness files, virtualenvs, and other side projects are
+ignored too, so the GitHub repo stays focused for teammates, instructors, and
+TAs.
 
 ## 🔌 Hardware Map
 
@@ -107,23 +110,29 @@ byte alignment is lost.
 
 | Byte | Field | Meaning |
 |:----:|-------|---------|
-| 0 | opcode | `M` = motion/fire, `S` = stop and exit |
+| 0 | opcode | `M` = motion/fire. Hub stop uses Pybricks remote `STOP`; stdin `S` is legacy only |
 | 1 | `pan_err_i8` | Signed pan error `[-100, 100]`, encoded `value & 0xFF` |
 | 2 | `tilt_err_i8` | Signed tilt error `[-100, 100]`, encoded `value & 0xFF` |
 | 3 | `fire` | `1` latches one firing cycle, else `0` |
 
-The current Hub runner maps signed command values directly into absolute target
-angles:
+The current Hub runner does not call `reset_angle()`. Instead it uses the
+calibrated absolute home readings measured on the Team5 robot:
+`PAN_HOME=-172` on port F, `TILT_HOME=-20` on port D, and `C_HOME=43` on port C.
+Signed Mac commands are converted into camera offsets and applied as
+`HOME + offset`:
 
 ```python
-pan_target  = clamp(pan_val / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
-tilt_target = clamp((tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
+pan_offset  = clamp(pan_val / 100.0 * PAN_MAX, PAN_MIN, PAN_MAX)
+tilt_offset = clamp((tilt_val + 100) / 200.0 * (TILT_MAX - TILT_MIN) + TILT_MIN,
                     TILT_MIN, TILT_MAX)
+pan_motor.track_target(PAN_HOME + pan_offset)
+tilt_motor.track_target(TILT_HOME + tilt_offset)
 ```
 
-The Hub replies `rdy` after each packet (plus a 200 ms heartbeat to survive
-dropped notifications), and prints status lines the Mac echoes as `[Hub] ...`:
-`READY`, `ARMED`, `FIRING`, `RETURNING`, and `FIRED`.
+The Hub replies `rdy` at startup and after each processed packet. It prints
+status lines the Mac echoes as `[Hub] ...`: `HOME_CHECK`, `SERVER_VERSION`,
+`READY`, `ARMED`, `FIRE_REQ`, `SPINUP`, `SHOT f=... d=...`, `FIRING`,
+`RETURNING`, and `FIRED`.
 
 > 📖 Full details: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
@@ -150,7 +159,15 @@ Expected path:
 [READY] rdy received.
 [SEND] M,100,0,0 -> b'M\x64\x00\x00'
 [SEND] M,0,0,1   -> b'M\x00\x00\x01'
-[Hub] FIRING → RETURNING → ARMED → FIRED
+[Hub] FIRE_REQ → SPINUP → SHOT f=... d=... → FIRING → RETURNING → ARMED → FIRED
+```
+
+Home-only check:
+
+```bash
+python bt_manual_motor_test.py --hub-name "Team5" --print-sends --debug-rx \
+  --connect-attempts 5 --connect-timeout 60 \
+  --home-only --home-seconds 6 --home-pan 0 --home-tilt -100
 ```
 
 ### 2. Hand gesture control
@@ -173,20 +190,44 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 ```
 
 Detects a red target by HSV, predicts a future impact point from smoothed
-velocity + vertical acceleration, and fires when the predicted point enters the
-center lock window.
+velocity + vertical acceleration, and fires automatically with a one-shot per
+target state machine: `TRACKING -> LOCKED -> FIRED_FOR_TARGET -> REARM_WAIT`.
+`fire=1` is sent only after the predicted point stays inside the lock window
+for `--fire-confirm-frames` consecutive frames. After a shot, the same
+continuous target receives aim-only packets until it disappears for
+`--target-lost-rearm` seconds.
 
 | Option | Purpose |
 |--------|---------|
 | `--flight-time` | Projectile travel time used by the parabolic predictor |
 | `--fire-px` | Center lock window, in pixels |
+| `--fire-confirm-frames` | Consecutive in-window frames required before firing (default `2`) |
+| `--target-lost-rearm` | Seconds target must disappear before the next shot is allowed (default `0.5`) |
+| `--no-fire` | Track and aim without sending `fire=1` |
 | `--min-area` | Minimum red contour area |
 | `--send-interval` | Minimum BLE command interval |
+| `--post-recovery-replay` | Aim-only replay window after BLE/Hub recovery; fire commands are never replayed |
+| `--dataset` / `--no-dataset` | Save or disable `SHOT`-joined calibration rows in `aim_dataset.csv` |
 | `--camera`, `--width`, `--height` | Camera index and frame size |
 | `--no-auto-start` | Disable Mac-side remote START |
 | `--connect-timeout` | BLE connect timeout in seconds (default `45`) |
-| `--connect-attempts` | BLE scan/connect retries before giving up (default `3`) |
+| `--connect-attempts` | BLE scan/connect retries before giving up (default `5`) |
 | `--keep-hub-running` | Leave the Hub program running after the camera script exits (default sends `STOP` so the Hub is ready to re-run) |
+
+### 4. Fire and reconnect verification
+
+```bash
+# Single-shot verification
+python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
+  --connect-attempts 5 --connect-timeout 60 --shot-timeout 10 --skip-forced-stop
+
+# Forced STOP, auto-recovery, then shot verification
+python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
+  --connect-attempts 5 --connect-timeout 60 --shot-timeout 10
+```
+
+Passing output includes `SERVER_VERSION gesture_server_2026_06_03_fire_spinup_state`,
+`SHOT f=... d=...`, `RETURNING`, `ARMED`, and `FIRED`.
 
 ---
 
@@ -207,15 +248,18 @@ center lock window.
 | Module | Status | Owner |
 |--------|:------:|:-----:|
 | Pybricks BLE direct architecture | ✅ | P2 |
-| 4-byte protocol + `rdy` flow control + heartbeat | ✅ | P2 |
+| 4-byte protocol + `rdy` flow control | ✅ | P2 |
 | Hub parser self-recovery + stdin flush | ✅ | P2 |
-| Hub crash visibility (`ERR_*`, `FATAL`, `BTN_STOP`) | ✅ | P2 |
+| Hub absolute-home calibration (`F=-172`, `D=-20`, `C=43`) | ✅ | P2 · P5 |
 | Manual BLE motor test | ✅ | P2 |
 | Hand gesture control + fist-fire latch | ✅ | P3 · P2 |
 | Balloon/target HSV interception + parabolic prediction | ✅ | P3 · P4 |
+| One-shot-per-target auto-fire FSM | ✅ | P2 · P4 |
 | Mac-side remote START + `rdy` flow control | ✅ | P2 |
+| Reconnect replay protection: aim-only, never `fire=1` | ✅ | P2 |
+| Fire calibration dataset logging on `SHOT f/d` | ✅ | P5 |
 | Team roles + README dashboard + docs | ✅ | P5 |
-| Camera-to-turret calibration routine | 🔜 | P5 · P2 |
+| Camera-to-turret calibration regression | 🔜 | P5 · P2 |
 | Deterministic recorded-video replay harness | 🔜 | P5 |
 | Target robustness (area gate, continuity, lost-target recovery) | ⬜ | P3 |
 | Flight-time + latency calibration | ⬜ | P4 · P5 |
@@ -226,7 +270,7 @@ center lock window.
 
 | # | Item | Owner | Why it matters | Device? |
 |:-:|------|:-----:|----------------|:-------:|
-| 1 | **Camera-to-turret calibration** | P5 · P2 | Error-based steering works, but repeatable interception needs a measured pixel→angle mapping plus sign/gain confirmation. Biggest accuracy lever. | 🔴 Yes |
+| 1 | **Camera-to-turret calibration regression** | P5 · P2 | `SHOT f/d` rows are now logged; next step is collecting enough samples and fitting pixel→angle correction. Biggest accuracy lever. | 🔴 Yes |
 | 2 | **Recorded-video replay harness** | P5 | A deterministic clip-replay mode lets P3/P4 compare detection/prediction changes on identical input without occupying the robot. | 🟢 No |
 | 3 | **Target robustness** | P3 | Min/max area gating, frame-to-frame continuity, and lost-target recovery cut false locks and accidental shots. | 🟢 No |
 | 4 | **Flight-time / latency calibration** | P4 · P5 | BLE + processing + projectile delay set the correct lead; measure and fold into the predictor. | 🔴 Yes |
@@ -258,8 +302,9 @@ Run device-free work in parallel; book the single robot in short slots.
 | Hub stops mid-run, then resumes | Hub program ended; Mac auto-recovered | Expected: Mac re-sends `START` (`[RECOVER] ... sending remote START`) and continues on the next `rdy` |
 | First connect fails, second succeeds | BLE scan/connect is flaky on first try | Expected with default 3 retries; raise `--connect-attempts`/`--connect-timeout` if it persists |
 | `[BLE] connected` but no `[READY]` | Hub program did not send `rdy` | Keep `--auto-start` enabled, disconnect Pybricks Code/SPIKE App, power-cycle Hub, retry |
-| `[WAIT] Hub not sending rdy` | No readiness heartbeat yet | Retry with `--debug-rx`; use `--no-auto-start` only for manual center-button diagnostics |
-| `[STALE] Hub is silent` | Link alive but Hub program stopped/crashed | Restart Hub program; check `[Hub] FATAL...` output |
+| `[WAIT] Hub not sending rdy` | Hub program has not started/responded yet | Retry with `--debug-rx`; use `--no-auto-start` only for manual center-button diagnostics |
+| `READY` does not appear after using Pybricks Code | Pybricks Code still owns BLE or Hub is not advertising | Disconnect Pybricks Code, power-cycle the Hub, wait for Team5 advertising, then run the Mac script |
+| `[STALE] Hub is silent` | Link alive but Hub program stopped/crashed | Let auto-recovery send remote `START`; if it repeats, power-cycle the Hub and re-upload the current Hub code |
 | `[DISCONNECT]` / `[RECONNECT]` | BLE link dropped | Keep Hub near and powered; tools rescan every 3 s unless `--no-reconnect` |
 | Motor points to the wrong side | Camera-to-motor mapping mismatch | Check `pixel_to_motor_vals()` on Mac and `PAN_MIN/PAN_MAX` or `TILT_MIN/TILT_MAX` on the Hub |
 | Motor range is too small or too wide | Angle range mismatch | Adjust `PAN_MIN/PAN_MAX` or `TILT_MIN/TILT_MAX` in `hub_pybricks_gesture_server.py` |
@@ -267,9 +312,8 @@ Run device-free work in parallel; book the single robot in short slots.
 
 ---
 
-*Verified 2026-06-03 against the Team5 Hub with Mac-side remote START. Direction:
-Pybricks BLE direct control. Repository scope: `gesture_bt/`, `docs/`,
-`README*.md`. Virtualenvs, bytecode caches, local logs, and MediaPipe `.task`
-models are intentionally not uploaded.*
-Pybricks BLE direct control. Repo boundary: `gesture_bt/`, `docs/`, `README*.md`.
-Harness files, venvs, archives, and the MediaPipe `.task` model are Git-ignored.*
+*Verified 2026-06-03 against the Team5 Hub with Mac-side remote START, forced
+STOP recovery, and single-shot fire logs. Direction: Pybricks BLE direct
+control. Repository scope: `gesture_bt/`, `docs/`, `README*.md`. Virtualenvs,
+bytecode caches, local logs, generated datasets, and MediaPipe `.task` models
+are intentionally not uploaded.*

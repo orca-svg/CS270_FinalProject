@@ -26,6 +26,7 @@ CLAUDE.md
 # Local copies / generated model artifacts
 *복사본*
 gesture_bt/models/*.task
+gesture_bt/aim_dataset.csv
 
 # Other projects in this directory
 Final_project/
