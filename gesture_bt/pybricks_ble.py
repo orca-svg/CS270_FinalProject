@@ -211,6 +211,23 @@ class PybricksBleSender:
             self._connecting = False
         if self.auto_start:
             await self._start_user_program()
+        
+        # STDIN Priming: 연결 완료 후 무해한 STOP 명령(b'S\x00\x00\x00')을 1회 송신하여 Hub의 rdy를 자극(유도)합니다.
+        await self._prime_hub()
+
+    async def _prime_hub(self) -> None:
+        if not self.client or not self.connected:
+            return
+        try:
+            print("[PRIMING] Sending harmless STDIN priming packet to wake up Hub rdy...")
+            # b'\x06' + packet_for("STOP") = b'\x06S\x00\x00\x00'
+            await self.client.write_gatt_char(
+                PYBRICKS_COMMAND_EVENT_CHAR_UUID,
+                b"\x06S\x00\x00\x00",
+                response=True,
+            )
+        except Exception as exc:
+            print(f"[PRIMING] STDIN priming failed: {exc}")
 
     async def _start_user_program(self) -> None:
         """Opt-in remote start.
@@ -260,6 +277,7 @@ class PybricksBleSender:
                     continue
                 try:
                     await self._do_connect(device)
+                    # _do_connect internally calls _prime_hub to wake up rdy
                     print("[RECONNECT] BLE reconnected. Waiting up to 2s for Hub rdy.")
                     await asyncio.wait_for(self.ready.wait(), timeout=2.0)
                     print("[READY] reconnect rdy received; Hub program resumed.")
