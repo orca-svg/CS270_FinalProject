@@ -246,6 +246,31 @@ class PybricksBleSender:
         )
         print("[STOP] sent remote STOP command to Hub.")
 
+    async def _prime_handshake(self) -> bool:
+        """Bypass the ready gate and write one harmless stdin packet.
+
+        After a BLE reconnect where the Hub program keeps RUNNING, the Hub does
+        not re-emit startup rdy and never reads stdin, so the rdy handshake never
+        re-bootstraps and send() blocks on ready.wait() forever. The Hub only
+        acts on the 'M' opcode; 'S' over stdin is ignored (it is NOT treated as a
+        STOP). But reading any stdin packet makes the Hub emit rdy, which
+        re-bootstraps the handshake. This is backward compatible with Hub
+        firmware that has no heartbeat rdy.
+        """
+        if not self.client or not self.connected:
+            return False
+        try:
+            await self.client.write_gatt_char(
+                PYBRICKS_COMMAND_EVENT_CHAR_UUID,
+                b"\x06" + b"S\x00\x00\x00",
+                response=True,
+            )
+            print("[PRIME] wrote priming stdin packet to re-bootstrap Hub rdy handshake.")
+            return True
+        except Exception as exc:
+            print(f"[PRIME] priming stdin write failed: {exc}")
+            return False
+
     async def _reconnect_loop(self) -> None:
         self._reconnecting = True
         attempt = 0
@@ -264,11 +289,15 @@ class PybricksBleSender:
                     await asyncio.wait_for(self.ready.wait(), timeout=2.0)
                     print("[READY] reconnect rdy received; Hub program resumed.")
                 except asyncio.TimeoutError:
-                    print("[WAIT] BLE reconnected, but Hub rdy is missing. Retrying remote START once.")
-                    await self._start_user_program()
+                    if self._program_running is False:
+                        print("[WAIT] BLE reconnected, but Hub rdy is missing and program is STOPPED. Retrying remote START once.")
+                        await self._start_user_program()
+                    else:
+                        print("[WAIT] BLE reconnected, Hub program RUNNING but no rdy. Priming stdin once to re-bootstrap.")
+                        await self._prime_handshake()
                     try:
                         await asyncio.wait_for(self.ready.wait(), timeout=3.0)
-                        print("[READY] reconnect rdy received after START retry.")
+                        print("[READY] reconnect rdy received after recovery retry.")
                     except asyncio.TimeoutError:
                         print("[RECONNECT] rdy still missing; disconnecting and retrying scan.")
                         with contextlib.suppress(Exception):
@@ -433,7 +462,7 @@ class PybricksBleSender:
             )
         return False
 
-    async def send(self, command: str, timeout: float = 1.0) -> bool:
+    async def send(self, command: str, timeout: float = 1.0, *, _primed: bool = False) -> bool:
         if not self.client or not self.connected:
             if not await self._wait_for_connected(timeout=max(2.0, timeout)):
                 print(f"[BLE] not connected; skipped {command.strip()!r}")
@@ -453,6 +482,25 @@ class PybricksBleSender:
                 if self._program_running is False and command_name != "STOP":
                     if await self.resume_if_stopped(timeout=max(2.0, timeout)):
                         return await self.send(command, timeout=timeout)
+                if (
+                    not _primed
+                    and self._program_running
+                    and command_name != "STOP"
+                ):
+                    # RUNNING but rdy keeps timing out post-reconnect: the Hub
+                    # never re-bootstrapped its rdy handshake. One-shot prime to
+                    # make the Hub emit rdy, then retry exactly once instead of
+                    # returning False indefinitely.
+                    print("[PRIME] Hub RUNNING but rdy stalled; priming once to re-bootstrap handshake.")
+                    if await self._prime_handshake():
+                        try:
+                            await asyncio.wait_for(self.ready.wait(), timeout=max(2.0, timeout))
+                            self.recovery_generation += 1
+                            print("[READY] rdy received after priming; handshake re-bootstrapped.")
+                            return await self.send(command, timeout=timeout, _primed=True)
+                        except asyncio.TimeoutError:
+                            print("[PRIME] priming sent, but no rdy arrived yet.")
+                            return False
                 if self.allow_open_loop and self._program_running and not self._stdout_seen:
                     self._open_loop = True
                     print("[OPEN-LOOP] Hub program is RUNNING but no rdy is arriving; switching to open-loop sending.")

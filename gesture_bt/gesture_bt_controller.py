@@ -250,6 +250,8 @@ async def run(args: argparse.Namespace) -> None:
     last_timestamp_ms = 0
     prev_fist = False     # for edge detection: send fire=1 only on open→fist transition
     pending_fire = False  # latch: holds fire=1 until next send interval
+    # Track BLE/Hub re-bootstrap so we can tell the user and resend promptly.
+    last_seen_recovery_generation = getattr(sender, "recovery_generation", 0)
 
     try:
         while True:
@@ -296,17 +298,34 @@ async def run(args: argparse.Namespace) -> None:
                 prev_fist = False
 
             now = time.time()
-            if now - last_send_time >= args.send_interval:
+
+            # BLE/Hub가 재연결 후 핸드셰이크를 재부트스트랩하면 사용자에게 알리고,
+            # send_interval 을 기다리지 않고 즉시 최신 aim 명령을 다시 보낸다.
+            recovery_generation = getattr(sender, "recovery_generation", 0)
+            force_resend = False
+            if recovery_generation != last_seen_recovery_generation:
+                last_seen_recovery_generation = recovery_generation
+                force_resend = True
+                print("[RUN] BLE/Hub recovered; resending latest aim command now.")
+
+            if force_resend or now - last_send_time >= args.send_interval:
                 if result.hand_landmarks:
                     fire_to_send = 1 if pending_fire else 0
-                    pending_fire = False
                     command = f"M,{pan_err},{tilt_err},{fire_to_send}"
                 else:
                     command = "M,0,0,0"
                 if result.hand_landmarks or now - no_hand_since > args.no_hand_stop_delay:
-                    await sender.send(command)
-                    last_command = command
-                    last_send_time = now
+                    # send() 가 False(미전송)를 반환하면 fire latch 를 소실하지 않도록
+                    # pending_fire 를 유지하고 다음 루프에서 재시도한다. 루프는 계속 돈다.
+                    sent = await sender.send(command)
+                    if sent is False:
+                        # 미전송: latch 유지, last_send_time 도 갱신하지 않아 곧 재시도.
+                        pass
+                    else:
+                        if result.hand_landmarks:
+                            pending_fire = False
+                        last_command = command
+                        last_send_time = now
 
             # Hub가 침묵하면(프로그램 멈춤) 사용자에게 알림
             if hasattr(sender, "maybe_warn_stale"):

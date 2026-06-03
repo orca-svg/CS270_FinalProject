@@ -1,0 +1,48 @@
+name: Change archive
+description: Archive a completed or in-progress change with root cause and verification.
+title: "Archive: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One paragraph describing what changed and why.
+    validations:
+      required: true
+  - type: input
+    id: commits
+    attributes:
+      label: Commit(s)
+      description: Commit SHA(s), branch, or PR link.
+      placeholder: "db20895"
+    validations:
+      required: true
+  - type: textarea
+    id: cause
+    attributes:
+      label: Root cause / trigger
+      description: What problem or observation caused this change?
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files changed
+      description: List the files and the role of each.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Commands, hardware tests, and remaining gaps.
+    validations:
+      required: true
+  - type: textarea
+    id: follow-up
+    attributes:
+      label: Follow-up
+      description: What should be done next?
+    validations:
+      required: false

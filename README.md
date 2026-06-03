@@ -129,15 +129,19 @@ pan_motor.track_target(PAN_HOME + pan_offset)
 tilt_motor.track_target(TILT_HOME + tilt_offset)
 ```
 
-The Hub replies `rdy` at startup and after each processed packet. It prints
-status lines the Mac echoes as `[Hub] ...`: `HOME_CHECK`, `SERVER_VERSION`,
-`READY`, `ARMED`, `FIRE_REQ`, `SPINUP`, `SHOT f=... d=...`, `FIRING`,
-`RETURNING`, and `FIRED`.
+The Hub replies `rdy` at startup, after each processed packet, and via a
+throttled heartbeat while RUNNING so Mac-side reconnects can re-bootstrap the
+stdin handshake. If the Hub is RUNNING but `rdy` is still missing after a BLE
+reconnect, the Mac sends one harmless priming stdin packet and retries. The Hub
+prints status lines the Mac echoes as `[Hub] ...`: `HOME_CHECK`,
+`SERVER_VERSION`, `READY`, `ARMED`, `FIRE_REQ`, `SPINUP`, `SHOT f=... d=...`,
+`FIRING`, `RETURNING`, and `FIRED`.
 
 > 📖 Full details: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) ·
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 > [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) ·
-> [`docs/PREDICTION.md`](docs/PREDICTION.md)
+> [`docs/PREDICTION.md`](docs/PREDICTION.md) ·
+> [`docs/GITHUB_WORKFLOW.md`](docs/GITHUB_WORKFLOW.md)
 
 ---
 
@@ -303,6 +307,7 @@ Run device-free work in parallel; book the single robot in short slots.
 | First connect fails, second succeeds | BLE scan/connect is flaky on first try | Expected with default 3 retries; raise `--connect-attempts`/`--connect-timeout` if it persists |
 | `[BLE] connected` but no `[READY]` | Hub program did not send `rdy` | Keep `--auto-start` enabled, disconnect Pybricks Code/SPIKE App, power-cycle Hub, retry |
 | `[WAIT] Hub not sending rdy` | Hub program has not started/responded yet | Retry with `--debug-rx`; use `--no-auto-start` only for manual center-button diagnostics |
+| RUNNING after reconnect but no target motion | `rdy` handshake did not re-bootstrap | Current code emits Hub heartbeat `rdy` and can send one priming stdin packet; verify `SERVER_VERSION ..._rdy_heartbeat` is uploaded |
 | `READY` does not appear after using Pybricks Code | Pybricks Code still owns BLE or Hub is not advertising | Disconnect Pybricks Code, power-cycle the Hub, wait for Team5 advertising, then run the Mac script |
 | `[STALE] Hub is silent` | Link alive but Hub program stopped/crashed | Let auto-recovery send remote `START`; if it repeats, power-cycle the Hub and re-upload the current Hub code |
 | `[DISCONNECT]` / `[RECONNECT]` | BLE link dropped | Keep Hub near and powered; tools rescan every 3 s unless `--no-reconnect` |

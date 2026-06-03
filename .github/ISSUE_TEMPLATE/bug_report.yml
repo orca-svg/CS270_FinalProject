@@ -1,0 +1,53 @@
+name: Bug report
+description: Track a reproducible Gesture-BT failure, cause, and fix plan.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: What did the operator observe?
+      placeholder: "Example: BLE reconnects, Hub status is RUNNING, but D/F no longer follow target commands."
+    validations:
+      required: true
+  - type: textarea
+    id: run-command
+    attributes:
+      label: Run command
+      description: Paste the exact command and relevant flags.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Key logs
+      description: Include only the lines needed to show the failure.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: suspected-cause
+    attributes:
+      label: Suspected cause
+      description: State the current hypothesis. It is fine if this changes after debugging.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+  - type: checkboxes
+    id: environment
+    attributes:
+      label: Environment checks
+      options:
+        - label: Pybricks Code/SPIKE App disconnected before Mac script
+        - label: Latest `hub_pybricks_gesture_server.py` uploaded to Hub
+        - label: Hub name is `Team5` or command uses the correct `--hub-name`
+        - label: macOS camera permission checked when camera is involved
+        - label: Generated files such as `.venv`, `models/*.task`, and `aim_dataset.csv` are not part of the fix

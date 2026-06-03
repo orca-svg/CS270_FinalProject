@@ -9,7 +9,7 @@ from usys import stdin, stdout
 from uselect import poll
 
 hub = PrimeHub()
-SERVER_VERSION = "gesture_server_2026_06_03_fire_spinup_state"
+SERVER_VERSION = "gesture_server_2026_06_03_fire_spinup_state_rdy_heartbeat"
 
 
 def write_line(text):
@@ -43,6 +43,12 @@ PAN_MAX = 35
 TILT_MIN = 0
 TILT_MAX = 80
 COMMAND_TIMEOUT_MS = 1000
+# Heartbeat: re-emit b"rdy" unconditionally at this interval so the Mac can
+# re-bootstrap the request-response handshake after a BLE disconnect->reconnect
+# where this Hub program keeps running (so startup rdy is never re-sent and no
+# stdin arrives to trigger the post-stdin rdy). The main loop runs every 5ms, so
+# throttle via watch.time() to avoid flooding BLE.
+HEARTBEAT_MS = 100
 DEBUG_CMD_LINES = False
 
 # Absolute home references: the motor.angle() readings at the calibrated home
@@ -241,6 +247,7 @@ def main():
     have_target = False
     can_fire = False
     last_cmd_ms = watch.time()
+    last_rdy_ms = watch.time()
     running = True
 
     while running:
@@ -285,6 +292,7 @@ def main():
                 stdout.buffer.write(b"rdy")
             except Exception:
                 pass
+            last_rdy_ms = watch.time()
 
         try:
             if have_target:
@@ -308,6 +316,16 @@ def main():
         if watch.time() - last_cmd_ms > COMMAND_TIMEOUT_MS:
             pan_target = 0.0
             tilt_target = 0.0
+
+        # Heartbeat rdy: even when no stdin arrived, re-emit b"rdy" every
+        # HEARTBEAT_MS so a reconnected Mac can re-bootstrap the handshake.
+        # Throttled with watch.time() so the 5ms loop does not flood BLE.
+        if watch.time() - last_rdy_ms >= HEARTBEAT_MS:
+            try:
+                stdout.buffer.write(b"rdy")
+            except Exception:
+                pass
+            last_rdy_ms = watch.time()
 
         wait(5)
 
