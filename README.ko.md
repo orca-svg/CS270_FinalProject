@@ -11,8 +11,9 @@ Mac / laptop  ──Pybricks BLE (GATT c5f50002-…)──►  SPIKE Prime Hub  
  비전 + 제어 루프                                    hub_pybricks_gesture_server.py
 ```
 
-공유 저장소는 Pybricks BLE 구현, 기술 문서, 재현 가능한 실행/검증 절차만 담도록
-범위를 좁힌다.
+공유 저장소는 Pybricks BLE 구현, 기술 문서, 재현 가능한 실행/검증 절차를 담는다.
+주력 플랫폼은 macOS이며, Windows 스레드 변형(`*_win.py`)과 로봇 없이 도는 오프라인
+도구(`*_offline.py`)가 비전/예측 작업용으로 주력 경로와 함께 들어 있다.
 
 ---
 
@@ -60,30 +61,49 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 > Pybricks Code/SPIKE App 연결을 끊은 뒤, Mac 스크립트가 저장된 Hub 프로그램을
 > 자동 시작하게 둔다.
 
+> **Windows / 로봇 없는 변형.** Windows에서는 `gesture_bt_controller_win.py` 또는
+> `balloon_intercept_win.py`를 실행한다 — Bleak BLE 루프를 백그라운드 스레드에서
+> 돌리고 OpenCV를 메인 스레드에 두어 Windows COM 스레딩 충돌을 피한다. 로봇 없이
+> 비전/예측을 개발하려면 `balloon_tracker_offline.py`, `hand_tracker_offline.py`가
+> BLE 없이 카메라만으로 동작한다.
+
 ---
 
 ## 📦 저장소 구조
 
 ```text
 gesture_bt/
-  pybricks_ble.py                # 공유 BLE 스캔 / 재연결 / readiness / 진단
-  bt_manual_motor_test.py        # 카메라 없이 BLE + 모터 경로 테스트
-  bt_verify_restart_shot.py      # 발사 + 강제 재시작 검증
-  camera_check.py                # macOS/OpenCV 카메라 권한 확인
-  hub_angle_reader.py            # 홈 캘리브레이션용 D/F/C 절대 각도 읽기
-  gesture_bt_controller.py       # 손 제스처 컨트롤러
-  balloon_intercept.py           # HSV 탐지 + 포물선 예측 + 자동 발사
-  hub_pybricks_gesture_server.py # Hub 측 BLE 서버 + 모터 상태 머신
+  pybricks_ble.py                    # 공유 BLE 스캔 / 재연결 / readiness / 진단
+  bt_manual_motor_test.py            # 카메라 없이 BLE + 모터 경로 테스트
+  bt_verify_restart_shot.py          # 발사 + 강제 재시작 검증
+  camera_check.py                    # macOS/OpenCV 카메라 권한 확인
+  hub_angle_reader.py                # 홈 캘리브레이션용 D/F/C 절대 각도 읽기
+  calibrate_angle_regression.py      # 기록된 명중점으로 픽셀→팬/틸트 각도 보정식 피팅
+  gesture_bt_controller.py           # 손 제스처 컨트롤러 (macOS / 단일 asyncio 루프)
+  gesture_bt_controller_win.py       # Windows 변형: Bleak는 백그라운드 스레드, OpenCV는 메인 스레드
+  balloon_intercept.py               # HSV 탐지 + 포물선 예측 + 자동 발사
+  balloon_intercept_win.py           # balloon_intercept의 Windows 스레드 변형
+  hub_pybricks_gesture_server.py     # Hub 측 BLE 서버 + 모터 상태 머신
+  hub_pybricks_gesture_server_bak.py # 이전 Hub 서버 빌드 백업본
   requirements_gesture_bt.txt
 
-docs/                            # 심화 기술 문서 (영문 + ko/)
+balloon_tracker_offline.py           # 로봇 없이 도는 3D 물리 풍선 트래커 (카메라 + 마우스 HSV 스포이드)
+hand_tracker_offline.py              # 로봇 없이 도는 MediaPipe 손/제스처 테스터
+balloon_aimbot_design.md             # 풍선 궤적 + 자동조준 설계 노트 (공기저항, 리드샷)
+models/
+  hand_landmarker.task               # 오프라인 / Windows 용으로 동봉한 MediaPipe 모델
+
+docs/                                # 심화 기술 문서 (영문 + ko/)
   ARCHITECTURE.md  PROTOCOL.md  STATE_MACHINES.md  PREDICTION.md
 ```
 
-MediaPipe hand-landmarker 모델은 최초 실행 시 다운로드되며 Git에서 무시된다.
-발사 캘리브레이션 중 생성되는 `gesture_bt/aim_dataset.csv`도 Git에서 무시된다.
-로컬 하네스 파일, 가상환경, 다른 사이드 프로젝트도 무시하여 팀원/교수/TA가 보는
-GitHub 저장소를 실행 코드와 문서 중심으로 유지한다.
+macOS 스크립트(`gesture_bt_controller.py`, `balloon_intercept.py`)는 최초 실행 시
+MediaPipe hand-landmarker 모델을 `gesture_bt/models/`에 다운로드하며 이 경로는
+Git에서 무시된다. 오프라인 도구와 Windows 스레드 변형이 다운로드 없이 동작하도록
+저장소 루트 `models/hand_landmarker.task`에 사본을 커밋해 둔다. 발사 캘리브레이션
+중 생성되는 `gesture_bt/aim_dataset.csv`는 Git에서 무시된다. 로컬 하네스 파일,
+가상환경, 다른 사이드 프로젝트도 무시하여 팀원/교수/TA가 보는 GitHub 저장소를
+실행 코드와 문서 중심으로 유지한다.
 
 ## 🔌 하드웨어 포트
 
@@ -306,6 +326,7 @@ python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
 ---
 
 *2026-06-03 Team5 Hub에서 Mac 측 원격 START, 강제 STOP 복구, 단발 발사 로그로
-검증. 방향: Pybricks BLE 직결 제어. 저장소 범위: `gesture_bt/`, `docs/`,
-`README*.md`. 가상환경, bytecode cache, local log, generated dataset,
-MediaPipe `.task` 모델은 업로드하지 않음.*
+검증. 방향: Pybricks BLE 직결 제어. 저장소 범위: `gesture_bt/`, `docs/`, 루트
+오프라인 도구(`*_offline.py`), `balloon_aimbot_design.md`,
+`models/hand_landmarker.task`, `README*.md`. 가상환경, bytecode cache, local log,
+generated dataset, 최초 실행 시 받는 `gesture_bt/models/` 다운로드는 업로드하지 않음.*

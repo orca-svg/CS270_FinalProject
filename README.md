@@ -11,8 +11,10 @@ Mac / laptop  ──Pybricks BLE (GATT c5f50002-…)──►  SPIKE Prime Hub  
  vision + control loop                              hub_pybricks_gesture_server.py
 ```
 
-The shared repo is intentionally scoped to the Pybricks BLE implementation,
-its technical docs, and reproducible run/test instructions.
+The shared repo is scoped to the Pybricks BLE implementation, its technical
+docs, and reproducible run/test instructions. macOS is the primary platform;
+Windows-threaded variants (`*_win.py`) and no-robot offline tools
+(`*_offline.py`) live alongside the main path for vision/prediction work.
 
 ---
 
@@ -61,28 +63,47 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 > disconnect Pybricks Code/SPIKE App, and let the Mac script auto-start the
 > saved Hub program.
 
+> **Windows / no-robot variants.** On Windows, run `gesture_bt_controller_win.py`
+> or `balloon_intercept_win.py` — they run the Bleak BLE loop on a background
+> thread and keep OpenCV on the main thread to avoid COM threading conflicts. To
+> develop vision/prediction without a robot, `balloon_tracker_offline.py` and
+> `hand_tracker_offline.py` run camera-only with no BLE.
+
 ---
 
 ## 📦 Repository Structure
 
 ```text
 gesture_bt/
-  pybricks_ble.py                # Shared BLE scan / reconnect / readiness / diagnostics
-  bt_manual_motor_test.py        # BLE + motor path test (no camera)
-  bt_verify_restart_shot.py      # Fire + forced-restart verification
-  camera_check.py                # macOS/OpenCV camera permission check
-  hub_angle_reader.py            # Read D/F/C absolute motor angles for home calibration
-  gesture_bt_controller.py       # Hand-gesture controller
-  balloon_intercept.py           # HSV detection + parabolic prediction + auto-fire
-  hub_pybricks_gesture_server.py # Hub-side BLE server + motor state machine
+  pybricks_ble.py                    # Shared BLE scan / reconnect / readiness / diagnostics
+  bt_manual_motor_test.py            # BLE + motor path test (no camera)
+  bt_verify_restart_shot.py          # Fire + forced-restart verification
+  camera_check.py                    # macOS/OpenCV camera permission check
+  hub_angle_reader.py                # Read D/F/C absolute motor angles for home calibration
+  calibrate_angle_regression.py      # Fit pixel→pan/tilt angle correction from recorded hits
+  gesture_bt_controller.py           # Hand-gesture controller (macOS / single asyncio loop)
+  gesture_bt_controller_win.py       # Windows variant: Bleak on a background thread, OpenCV on main thread
+  balloon_intercept.py               # HSV detection + parabolic prediction + auto-fire
+  balloon_intercept_win.py           # Windows-threaded variant of balloon_intercept
+  hub_pybricks_gesture_server.py     # Hub-side BLE server + motor state machine
+  hub_pybricks_gesture_server_bak.py # Backup of a previous Hub server build
   requirements_gesture_bt.txt
 
-docs/                            # Deep-dive technical docs (EN + ko/)
+balloon_tracker_offline.py           # No-robot 3D-physics balloon tracker (camera + mouse HSV picker)
+hand_tracker_offline.py              # No-robot MediaPipe hand/gesture tester
+balloon_aimbot_design.md             # Balloon trajectory + aimbot design notes (air drag, lead-shot)
+models/
+  hand_landmarker.task               # MediaPipe model bundled for offline / Windows use
+
+docs/                                # Deep-dive technical docs (EN + ko/)
   ARCHITECTURE.md  PROTOCOL.md  STATE_MACHINES.md  PREDICTION.md
 ```
 
-The MediaPipe hand-landmarker model downloads on first run and is Git-ignored.
-`gesture_bt/aim_dataset.csv` is generated during fire calibration and is also
+The macOS scripts (`gesture_bt_controller.py`, `balloon_intercept.py`) fetch the
+MediaPipe hand-landmarker model into `gesture_bt/models/` on first run; that path
+is Git-ignored. A copy is committed at the repo root `models/hand_landmarker.task`
+so the offline tools and Windows-threaded variants can run without the download.
+`gesture_bt/aim_dataset.csv` is generated during fire calibration and is
 Git-ignored. Local harness files, virtualenvs, and other side projects are
 ignored too, so the GitHub repo stays focused for teammates, instructors, and
 TAs.
@@ -314,6 +335,7 @@ Run device-free work in parallel; book the single robot in short slots.
 
 *Verified 2026-06-03 against the Team5 Hub with Mac-side remote START, forced
 STOP recovery, and single-shot fire logs. Direction: Pybricks BLE direct
-control. Repository scope: `gesture_bt/`, `docs/`, `README*.md`. Virtualenvs,
-bytecode caches, local logs, generated datasets, and MediaPipe `.task` models
-are intentionally not uploaded.*
+control. Repository scope: `gesture_bt/`, `docs/`, root offline tools
+(`*_offline.py`), `balloon_aimbot_design.md`, `models/hand_landmarker.task`, and
+`README*.md`. Virtualenvs, bytecode caches, local logs, generated datasets, and
+the first-run `gesture_bt/models/` download are not uploaded.*
