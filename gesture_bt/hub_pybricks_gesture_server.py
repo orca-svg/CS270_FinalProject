@@ -40,10 +40,10 @@ pan_motor = safe_motor(Port.F, "F_PAN")
 
 PAN_MIN = -35
 PAN_MAX = 35
-TILT_MIN = 0
-TILT_MAX = 80
+TILT_MIN = 10
+TILT_MAX = 120
 COMMAND_TIMEOUT_MS = 1000
-DEBUG_CMD_LINES = False
+DEBUG_CMD_LINES = True
 
 # Absolute home references: the motor.angle() readings at the calibrated home
 # pose. We do NOT reset_angle, so these absolute-encoder values are reported
@@ -55,17 +55,17 @@ PAN_HOME = -172   # Port F (pan) at pan center -> camera offset 0
 TILT_HOME = -20   # Port D (tilt) at tilt bottom (tilt 0 deg)
 C_HOME = 43       # Port C (trigger) armed/rest position
 
-C_FIRE_TRAVEL = 170   # degrees the C trigger rotates per shot (relative to arm)
-C_FIRE_DC = 55
-C_RETURN_DC = 45
+C_FIRE_TRAVEL = 190   # degrees the C trigger rotates per shot (relative to arm)
+C_FIRE_DC = 85
+C_RETURN_DC = 70
 C_TOLERANCE = 3
 C_LAUNCH_SPINUP_MS = 350
-C_FIRE_TIMEOUT_MS = 1300
-C_RETURN_TIMEOUT_MS = 1300
+C_FIRE_TIMEOUT_MS = 400
+C_RETURN_TIMEOUT_MS = 400
 
 LAUNCH_PWM_A = 75
 LAUNCH_PWM_B = -75
-SPIN_LAUNCH_ON_START = False
+SPIN_LAUNCH_ON_START = True
 
 keyboard = poll()
 keyboard.register(stdin)
@@ -117,11 +117,8 @@ def start_launcher_wheels():
         try:
             launch_r.dc(LAUNCH_PWM_B)
         except Exception:
-            write_line("LAUNCH_B_DC_ERR")
+            write_line("LAUNCH_B_MISSING")
             ok = False
-    else:
-        write_line("LAUNCH_B_MISSING")
-        ok = False
     return ok
 
 
@@ -152,28 +149,19 @@ def c_update(can_fire):
     if c_state == "armed":
         if can_fire:
             write_line("FIRE_REQ")
-            start_launcher_wheels()
-            c_state = "spinup"
+            # 발사 휠은 이미 항상 돌고 있으므로, spinup 단계를 거치지 않고 바로 firing 단계로 진입하거나 spinup 대기 시간을 0으로 처리합니다.
+            c_state = "firing"
             c_state_started_ms = watch.time()
-            write_line("SPINUP")
-            return FIRE_CONSUMED
-    elif c_state == "spinup":
-        if elapsed >= C_LAUNCH_SPINUP_MS:
             try:
                 c_motor.dc(C_FIRE_DC)
             except Exception:
                 write_line("C_FIRE_DC_ERR")
-                stop_launcher_wheels()
                 c_state = "armed"
                 return FIRE_CONSUMED
-            c_state = "firing"
-            c_state_started_ms = watch.time()
-            # Report the actual pan(F)/tilt(D) motor angles at the moment of
-            # firing so the Mac side can log a calibration dataset row.
+            write_line("FIRING")
             write_line(
                 "SHOT f=" + motor_angle(pan_motor) + " d=" + motor_angle(tilt_motor)
             )
-            write_line("FIRING")
             return FIRE_CONSUMED
     elif c_state == "firing":
         if now >= C_HOME + C_FIRE_TRAVEL - C_TOLERANCE or elapsed >= C_FIRE_TIMEOUT_MS:
@@ -190,7 +178,7 @@ def c_update(can_fire):
     elif c_state == "returning":
         if now <= C_HOME + C_TOLERANCE or elapsed >= C_RETURN_TIMEOUT_MS:
             c_motor.stop()
-            stop_launcher_wheels()
+            # 발사 완료 후에도 휠 모터를 정지하지 않습니다.
             c_state = "armed"
             write_line("ARMED")
             return FIRE_DONE
@@ -198,7 +186,11 @@ def c_update(can_fire):
     return FIRE_NONE
 
 
+# Global variable to track periodic report timing
+last_angle_print_ms = 0
+
 def main():
+    global last_angle_print_ms
     stop_all()
 
     # Do NOT reset_angle. Resetting would redefine "0" at wherever the turret
@@ -291,7 +283,19 @@ def main():
                 if pan_motor:
                     pan_motor.track_target(int(PAN_HOME + pan_target))
                 if tilt_motor:
-                    tilt_motor.track_target(int(TILT_HOME + tilt_target))
+                    goal_tilt = int(TILT_HOME + tilt_target)
+                    curr_tilt = tilt_motor.angle()
+                    # 위로 들어올리는 기동 (목표각이 현재각보다 높을 때)
+                    if goal_tilt > curr_tilt + 2:
+                        # 한계 전압/토크 세기를 최대로 높여서 힘을 강하게 줍니다 (가속도와 토크 한계 조정)
+                        # Pybricks limits: (speed, acceleration, torque)
+                        # 기본 토크보다 넉넉하게 100% 한계치(또는 1000mNm 등 큰 값)를 부여하여 중력을 이기게 합니다.
+                        tilt_motor.control.limits(torque=1000)
+                    else:
+                        # 평소 수준(기본 토크 한계)으로 원복하여 모터 부하와 발열을 방지합니다.
+                        tilt_motor.control.limits(torque=300)
+                    
+                    tilt_motor.track_target(goal_tilt)
         except Exception:
             pass
 
@@ -308,6 +312,18 @@ def main():
         if watch.time() - last_cmd_ms > COMMAND_TIMEOUT_MS:
             pan_target = 0.0
             tilt_target = 0.0
+
+        # 주기적으로 현재 모터 실제 각도 및 rdy 하트비트 송신 (200ms 간격)
+        if watch.time() - last_angle_print_ms > 200:
+            write_line(
+                "ANGLE_REPORT pan=" + motor_angle(pan_motor)
+                + " tilt=" + motor_angle(tilt_motor)
+            )
+            try:
+                stdout.buffer.write(b"rdy")
+            except Exception:
+                pass
+            last_angle_print_ms = watch.time()
 
         wait(5)
 
