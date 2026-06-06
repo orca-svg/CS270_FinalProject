@@ -25,6 +25,33 @@ M,100,0,0  -> b'\x06' + b'M\x64\x00\x00'
 M,0,0,1    -> b'\x06' + b'M\x00\x00\x01'
 ```
 
+## Fire Modes
+
+Voice/LLM mode switching does **not** change the 4-byte Hub packet. The Mac or
+Windows controller reads a small JSON file and chooses when to send `fire=1`.
+Only `mode` is required; other fields are optional metadata from the voice/LLM
+module:
+
+```json
+{
+  "mode": "single",
+  "source": "voice",
+  "transcript": "single-shot mode",
+  "confidence": 0.92,
+  "updated_at": "2026-06-06T12:00:00+09:00"
+}
+```
+
+| Mode | Controller policy |
+|------|-------------------|
+| `single` | Send one `fire=1` after the target locks, then wait for target loss/rearm |
+| `burst` | While locked, send repeated `fire=1` requests no faster than `--burst-interval` |
+| `safe` | Never send `fire=1` |
+| `guard` | Sweep pan while no target is visible; target engagement uses single-shot policy |
+
+The Hub still only sees `M,pan,tilt,fire` and fires once when `fire == 1` while
+its C-motor state is `armed`.
+
 ## Control Rule
 
 The Hub does not reset motor angles at startup. It uses calibrated absolute

@@ -25,6 +25,32 @@ M,100,0,0  -> b'\x06' + b'M\x64\x00\x00'
 M,0,0,1    -> b'\x06' + b'M\x00\x00\x01'
 ```
 
+## 발사 모드
+
+음성 인식/LLM 모드 전환은 Hub의 4바이트 패킷을 바꾸지 않는다. Mac 또는 Windows
+컨트롤러가 작은 JSON 파일을 읽고 `fire=1`을 언제 보낼지 결정한다. 필수 필드는
+`mode` 하나이고, 나머지는 음성 인식/LLM 모듈에서 넘겨주는 선택 메타데이터다.
+
+```json
+{
+  "mode": "single",
+  "source": "voice",
+  "transcript": "단발 모드",
+  "confidence": 0.92,
+  "updated_at": "2026-06-06T12:00:00+09:00"
+}
+```
+
+| Mode | 컨트롤러 정책 |
+|------|---------------|
+| `single` | 표적 lock 후 `fire=1`을 1회 보내고 표적 상실/rearm까지 대기 |
+| `burst` | lock 상태에서 `--burst-interval`보다 빠르지 않게 `fire=1` 반복 요청 |
+| `safe` | `fire=1`을 보내지 않음 |
+| `guard` | 표적 미검출 시 pan sweep; 표적 교전은 single-shot 정책 사용 |
+
+Hub는 여전히 `M,pan,tilt,fire`만 보고, C 모터 상태가 `armed`일 때 `fire == 1`이면
+1회 발사한다.
+
 ## 제어 규칙
 
 Hub는 시작 시 모터 각도를 reset하지 않는다. Team5 로봇에서 측정한 절대 홈

@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import contextlib
 import csv
+import math
 import re
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ try:
 except ModuleNotFoundError as exc:
     raise SystemExit("Missing package. Install with: python -m pip install opencv-python numpy bleak") from exc
 
+from fire_mode_control import read_control_mode
 from pybricks_ble import PybricksBleSender
 
 
@@ -42,6 +44,7 @@ HOME_SEND_INTERVAL = 0.5
 HOME_PAN_VAL = 0
 HOME_TILT_VAL = -100
 POST_RECOVERY_REPLAY_SECONDS = 1.5
+MODE_READ_INTERVAL = 0.2
 
 TRACKING = "TRACKING"
 LOCKED = "LOCKED"
@@ -237,8 +240,13 @@ async def run_shooter(args: argparse.Namespace) -> None:
         target_lost_since: float | None = None
         fire_pending = False
         pending_fire_context: dict | None = None
+        control_mode_path = Path(args.control_mode_file)
+        current_fire_mode = args.default_fire_mode
+        last_mode_read_time = 0.0
+        last_burst_fire_time = 0.0
 
         print("[RUN] Balloon interception started. Press q in the camera window to quit.")
+        print(f"[MODE] default={current_fire_mode} control_file={control_mode_path}")
 
         while True:
             ret, frame = cap.read()
@@ -265,6 +273,16 @@ async def run_shooter(args: argparse.Namespace) -> None:
                     cv2.circle(frame, (target_x, target_y), 5, (0, 255, 0), -1)
 
             current_time = time.time()
+            if current_time - last_mode_read_time >= MODE_READ_INTERVAL:
+                next_mode = read_control_mode(control_mode_path, current_fire_mode)
+                if next_mode != current_fire_mode:
+                    print(f"[MODE] {current_fire_mode} -> {next_mode}")
+                    fire_confirm_count = 0
+                    fire_pending = False
+                    pending_fire_context = None
+                    fire_state = TRACKING
+                    current_fire_mode = next_mode
+                last_mode_read_time = current_time
             dt = current_time - prev_time
 
             if target_x is not None and target_y is not None:
@@ -293,11 +311,17 @@ async def run_shooter(args: argparse.Namespace) -> None:
                 last_aim_command = f"M,{pan_val},{tilt_val},0"
 
                 in_fire_window = abs(predict_x - center_x) < args.fire_px and abs(predict_y - center_y) < args.fire_px
-                if fire_state in (TRACKING, LOCKED):
+                if current_fire_mode == "safe":
+                    fire_confirm_count = 0
+                    fire_pending = False
+                    pending_fire_context = None
+                    fire_state = TRACKING
+                    cv2.putText(frame, "SAFE: FIRE DISABLED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                elif current_fire_mode == "burst":
+                    fire_confirm_count = 0
                     if in_fire_window:
-                        fire_confirm_count += 1
                         fire_state = LOCKED
-                        if fire_confirm_count >= args.fire_confirm_frames:
+                        if current_time - last_burst_fire_time >= args.burst_interval:
                             if not args.no_fire:
                                 fire_pending = True
                                 pending_fire_context = make_fire_context(
@@ -309,19 +333,42 @@ async def run_shooter(args: argparse.Namespace) -> None:
                                     pan_val,
                                     tilt_val,
                                 )
-                                fire_state = FIRED_FOR_TARGET
-                            cv2.putText(frame, "FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                            last_burst_fire_time = current_time
+                            cv2.putText(frame, "BURST FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                        else:
+                            cv2.putText(frame, "BURST LOCK", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 3)
                     else:
-                        fire_confirm_count = 0
                         fire_state = TRACKING
-                elif fire_state == FIRED_FOR_TARGET:
-                    fire_confirm_count = 0
-                    fire_trigger = 0
-                    if in_fire_window:
-                        cv2.putText(frame, "FIRED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                else:
+                    if fire_state in (TRACKING, LOCKED):
+                        if in_fire_window:
+                            fire_confirm_count += 1
+                            fire_state = LOCKED
+                            if fire_confirm_count >= args.fire_confirm_frames:
+                                if not args.no_fire:
+                                    fire_pending = True
+                                    pending_fire_context = make_fire_context(
+                                        current_time,
+                                        target_x,
+                                        target_y,
+                                        predict_x,
+                                        predict_y,
+                                        pan_val,
+                                        tilt_val,
+                                    )
+                                    fire_state = FIRED_FOR_TARGET
+                                cv2.putText(frame, "FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                        else:
+                            fire_confirm_count = 0
+                            fire_state = TRACKING
+                    elif fire_state == FIRED_FOR_TARGET:
+                        fire_confirm_count = 0
+                        fire_trigger = 0
+                        if in_fire_window:
+                            cv2.putText(frame, "FIRED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
-                if in_fire_window and fire_state == LOCKED:
-                    cv2.putText(frame, "FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                    if in_fire_window and fire_state == LOCKED:
+                        cv2.putText(frame, "FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
                 prev_x = target_x
                 prev_y = target_y
@@ -346,6 +393,11 @@ async def run_shooter(args: argparse.Namespace) -> None:
                 elif fire_state == LOCKED:
                     fire_state = TRACKING
 
+            if target_x is None and current_fire_mode == "guard":
+                pan_val = int(math.sin(current_time * args.guard_sweep_speed) * args.guard_sweep_pan)
+                tilt_val = args.home_tilt
+                cv2.putText(frame, "GUARD SWEEP", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+
             prev_time = current_time
 
             if sender.recovery_generation != last_seen_recovery_generation:
@@ -357,6 +409,7 @@ async def run_shooter(args: argparse.Namespace) -> None:
 
             cv2.line(frame, (center_x - 20, center_y), (center_x + 20, center_y), (255, 255, 255), 2)
             cv2.line(frame, (center_x, center_y - 20), (center_x, center_y + 20), (255, 255, 255), 2)
+            cv2.putText(frame, f"MODE: {current_fire_mode.upper()}", (10, frame_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             if fire_pending or current_time - last_send_time >= args.send_interval:
                 command_fire = 1 if fire_pending else fire_trigger
@@ -422,6 +475,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--home-send-interval", type=float, default=HOME_SEND_INTERVAL)
     parser.add_argument("--send-timeout", type=float, default=2.0)
     parser.add_argument("--post-recovery-replay", type=float, default=POST_RECOVERY_REPLAY_SECONDS)
+    parser.add_argument("--control-mode-file", default=str(Path(__file__).with_name("control_mode.json")), help="JSON file written by voice recognition: {'mode':'single|burst|safe|guard'}.")
+    parser.add_argument("--default-fire-mode", choices=["single", "burst", "safe", "guard"], default="single")
+    parser.add_argument("--burst-interval", type=float, default=0.7, help="Seconds between repeated fire=1 requests in burst mode.")
+    parser.add_argument("--guard-sweep-pan", type=command_value, default=70, help="Maximum pan command used for guard-mode sweep, -100..100.")
+    parser.add_argument("--guard-sweep-speed", type=float, default=1.2, help="Guard-mode sweep speed multiplier.")
     parser.add_argument("--no-fire", action="store_true", help="Track targets but never send fire=1; useful for D/F recovery tests.")
     parser.add_argument("--home-pan", type=command_value, default=HOME_PAN_VAL, help="Pan value sent when no target is visible, -100..100.")
     parser.add_argument("--home-tilt", type=command_value, default=HOME_TILT_VAL, help="Tilt value sent when no target is visible, -100..100.")

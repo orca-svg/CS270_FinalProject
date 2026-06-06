@@ -57,7 +57,45 @@ python gesture_bt_controller.py --hub-name "Team5" --print-sends
 
 # 3) Balloon / target interception  (preferred demo)
 python balloon_intercept.py --hub-name "Team5" --print-sends
+
+# Windows: keep OpenCV on the main thread and Bleak on a background thread
+python balloon_intercept_win.py --hub-name "Team5" --print-sends
 ```
+
+Voice/LLM mode switching is implemented as a Mac/Windows controller policy, not
+as a Hub packet-format change. The voice-recognition process writes a JSON
+object with a `mode` field into `gesture_bt/control_mode.json`; `balloon_intercept.py` and
+`balloon_intercept_win.py` read that file and change only when they send
+`fire=1` in the existing `M,pan,tilt,fire` command.
+
+The controller-side JSON shape is below. Only `mode` is required; the remaining
+fields are optional metadata for voice/LLM debugging and presentation overlays.
+
+```json
+{
+  "mode": "single",
+  "source": "voice",
+  "transcript": "single-shot mode",
+  "confidence": 0.92,
+  "updated_at": "2026-06-06T12:00:00+09:00"
+}
+```
+
+Allowed `mode` values: `single`, `burst`, `safe`, `guard`.
+
+```bash
+# Terminal 1: run the interceptor
+python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
+
+# Terminal 2: manual mode test in place of voice recognition
+echo '{"mode":"single"}' > control_mode.json   # precision single-shot
+echo '{"mode":"burst"}'  > control_mode.json   # repeat fire every --burst-interval while locked
+echo '{"mode":"safe"}'   > control_mode.json   # never send fire=1
+echo '{"mode":"guard"}'  > control_mode.json   # sweep pan when no target is visible
+```
+
+Related options: `--default-fire-mode`, `--burst-interval`, `--guard-sweep-pan`,
+`--guard-sweep-speed`, and `--control-mode-file`.
 
 > The current uploaded runner is the working robot path. Keep the Hub powered,
 > disconnect Pybricks Code/SPIKE App, and let the Mac script auto-start the
@@ -76,6 +114,7 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 ```text
 gesture_bt/
   pybricks_ble.py                    # Shared BLE scan / reconnect / readiness / diagnostics
+  fire_mode_control.py               # Shared JSON-based single/burst/safe/guard fire-mode policy
   bt_manual_motor_test.py            # BLE + motor path test (no camera)
   bt_verify_restart_shot.py          # Fire + forced-restart verification
   camera_check.py                    # macOS/OpenCV camera permission check

@@ -55,7 +55,45 @@ python gesture_bt_controller.py --hub-name "Team5" --print-sends
 
 # 3) 풍선 / 표적 요격  (데모 주력)
 python balloon_intercept.py --hub-name "Team5" --print-sends
+
+# Windows에서는 OpenCV GUI를 메인 스레드에 두는 스레드 변형을 사용
+python balloon_intercept_win.py --hub-name "Team5" --print-sends
 ```
+
+음성 인식/LLM 모드 전환은 Hub 패킷 형식을 바꾸지 않고 Mac/Windows 컨트롤러의
+발사 정책으로 구현한다. 기은 쪽 음성 인식 프로세스가 `gesture_bt/control_mode.json`에
+`mode` 필드를 포함한 JSON을 써 주면, `balloon_intercept.py`와
+`balloon_intercept_win.py`가 이를 읽어 기존 `M,pan,tilt,fire` 명령의 `fire` byte
+전송 타이밍만 바꾼다.
+
+준엽 쪽 컨트롤러가 받는 JSON 형태는 아래와 같다. 필수 필드는 `mode` 하나이고,
+나머지는 음성 인식/LLM 디버깅 및 발표 시각화용 메타데이터라서 없어도 된다.
+
+```json
+{
+  "mode": "single",
+  "source": "voice",
+  "transcript": "단발 모드",
+  "confidence": 0.92,
+  "updated_at": "2026-06-06T12:00:00+09:00"
+}
+```
+
+허용 `mode`: `single`, `burst`, `safe`, `guard`.
+
+```bash
+# 터미널 1: 요격 컨트롤러 실행
+python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
+
+# 터미널 2: 음성 인식 대신 수동으로 모드 변경 테스트
+echo '{"mode":"single"}' > control_mode.json   # 정밀 단발
+echo '{"mode":"burst"}'  > control_mode.json   # lock 상태에서 --burst-interval마다 반복 발사
+echo '{"mode":"safe"}'   > control_mode.json   # 발사 금지
+echo '{"mode":"guard"}'  > control_mode.json   # 표적 미검출 시 좌우 sweep 경계 모드
+```
+
+관련 옵션: `--default-fire-mode`, `--burst-interval`, `--guard-sweep-pan`,
+`--guard-sweep-speed`, `--control-mode-file`.
 
 > 현재 업로드 경로는 실제 로봇에서 검증된 실행 경로다. Hub 전원을 켜고
 > Pybricks Code/SPIKE App 연결을 끊은 뒤, Mac 스크립트가 저장된 Hub 프로그램을
@@ -74,6 +112,7 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 ```text
 gesture_bt/
   pybricks_ble.py                    # 공유 BLE 스캔 / 재연결 / readiness / 진단
+  fire_mode_control.py               # JSON 기반 single/burst/safe/guard 발사 모드 정책
   bt_manual_motor_test.py            # 카메라 없이 BLE + 모터 경로 테스트
   bt_verify_restart_shot.py          # 발사 + 강제 재시작 검증
   camera_check.py                    # macOS/OpenCV 카메라 권한 확인
@@ -220,6 +259,10 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 | `--min-area` | 빨간 contour 최소 면적 |
 | `--send-interval` | BLE 명령 최소 전송 간격 |
 | `--post-recovery-replay` | BLE/Hub 복구 직후 aim-only replay 시간; `fire=1`은 재전송하지 않음 |
+| `--control-mode-file` | 음성 인식/LLM 프로세스가 쓰는 모드 JSON 파일 경로 |
+| `--default-fire-mode` | JSON 파일이 없을 때 사용할 기본 모드: `single`, `burst`, `safe`, `guard` |
+| `--burst-interval` | `burst` 모드에서 반복 `fire=1` 요청 사이 최소 시간 |
+| `--guard-sweep-pan` / `--guard-sweep-speed` | `guard` 모드에서 표적 미검출 시 좌우 탐색 sweep 범위/속도 |
 | `--dataset` / `--no-dataset` | `SHOT`과 결합한 캘리브레이션 row를 `aim_dataset.csv`에 저장/비활성화 |
 | `--camera`, `--width`, `--height` | 카메라 인덱스와 프레임 크기 |
 | `--no-auto-start` | Mac 측 원격 START 비활성화 |
