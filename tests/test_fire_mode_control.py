@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "gesture_bt"))
 
 from fire_mode_control import (
     VALID_MODES,
+    describe_burst_decision,
     make_control_payload,
     read_control_mode,
     write_control_mode,
@@ -76,6 +77,63 @@ class FireModeControlTests(unittest.TestCase):
 
     def test_valid_modes_cover_presentation_modes(self):
         self.assertTrue({"single", "burst", "safe", "guard"}.issubset(VALID_MODES))
+
+    def test_describe_burst_decision_explains_fire_gate_reasons(self):
+        ready = describe_burst_decision(
+            current_time=10.0,
+            last_burst_fire_time=8.0,
+            burst_interval=0.7,
+            in_fire_window=True,
+            no_fire=False,
+            hub_program_running=True,
+        )
+        self.assertTrue(ready["should_request_fire"])
+        self.assertEqual(ready["reason"], "ready")
+
+        not_locked = describe_burst_decision(
+            current_time=10.0,
+            last_burst_fire_time=8.0,
+            burst_interval=0.7,
+            in_fire_window=False,
+            no_fire=False,
+            hub_program_running=True,
+        )
+        self.assertFalse(not_locked["should_request_fire"])
+        self.assertEqual(not_locked["reason"], "outside_fire_window")
+
+        cooling_down = describe_burst_decision(
+            current_time=10.0,
+            last_burst_fire_time=9.8,
+            burst_interval=0.7,
+            in_fire_window=True,
+            no_fire=False,
+            hub_program_running=True,
+        )
+        self.assertFalse(cooling_down["should_request_fire"])
+        self.assertEqual(cooling_down["reason"], "cooldown")
+        self.assertAlmostEqual(cooling_down["cooldown_remaining"], 0.5)
+
+        no_fire = describe_burst_decision(
+            current_time=10.0,
+            last_burst_fire_time=8.0,
+            burst_interval=0.7,
+            in_fire_window=True,
+            no_fire=True,
+            hub_program_running=True,
+        )
+        self.assertFalse(no_fire["should_request_fire"])
+        self.assertEqual(no_fire["reason"], "no_fire_flag")
+
+        hub_stopped = describe_burst_decision(
+            current_time=10.0,
+            last_burst_fire_time=8.0,
+            burst_interval=0.7,
+            in_fire_window=True,
+            no_fire=False,
+            hub_program_running=False,
+        )
+        self.assertFalse(hub_stopped["should_request_fire"])
+        self.assertEqual(hub_stopped["reason"], "hub_program_stopped")
 
 
 if __name__ == "__main__":

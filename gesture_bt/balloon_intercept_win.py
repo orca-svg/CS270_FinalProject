@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError as exc:
     raise SystemExit("Missing package. Install with: python -m pip install opencv-python numpy bleak") from exc
 
-from fire_mode_control import read_control_mode
+from fire_mode_control import describe_burst_decision, read_control_mode
 from pybricks_ble import DEFAULT_HUB_NAME, DryRunSender, PybricksBleSender, clamp
 
 
@@ -347,6 +347,8 @@ def run_camera(args: argparse.Namespace) -> None:
     current_fire_mode = args.default_fire_mode
     last_mode_read_time = 0.0
     last_burst_fire_time = 0.0
+    last_burst_debug_time = 0.0
+    last_burst_debug_reason = ""
 
     print("=====================================================")
     print(" 🚀 Windows Multi-Thread Interceptor Started")
@@ -480,23 +482,47 @@ def run_camera(args: argparse.Namespace) -> None:
                     cv2.putText(frame, "SAFE: FIRE DISABLED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
                 elif current_fire_mode == "burst":
                     fire_confirm_count = 0
-                    in_fire_window = abs(predict_x - center_x) < args.fire_px and abs(predict_y - center_y) < args.fire_px
-                    if in_fire_window:
+                    burst_fire_px = args.burst_fire_px if args.burst_fire_px is not None else args.fire_px
+                    in_burst_fire_window = abs(predict_x - center_x) < burst_fire_px and abs(predict_y - center_y) < burst_fire_px
+                    burst_decision = describe_burst_decision(
+                        current_time=current_time,
+                        last_burst_fire_time=last_burst_fire_time,
+                        burst_interval=args.burst_interval,
+                        in_fire_window=in_burst_fire_window,
+                        no_fire=args.no_fire,
+                        hub_program_running=None,
+                    )
+                    if args.fire_debug and (
+                        burst_decision["reason"] != last_burst_debug_reason
+                        or current_time - last_burst_debug_time >= args.fire_debug_interval
+                    ):
+                        dx = predict_x - center_x
+                        dy = predict_y - center_y
+                        print(
+                            "[FIRE-DEBUG] mode=burst "
+                            f"reason={burst_decision['reason']} "
+                            f"request={burst_decision['should_request_fire']} "
+                            f"dx={dx} dy={dy} window={burst_fire_px} "
+                            f"cooldown={burst_decision['cooldown_remaining']:.2f}s "
+                            f"state={fire_state} no_fire={args.no_fire}"
+                        )
+                        last_burst_debug_reason = burst_decision["reason"]
+                        last_burst_debug_time = current_time
+                    if in_burst_fire_window:
                         fire_state = LOCKED
-                        if current_time - last_burst_fire_time >= args.burst_interval:
-                            if not args.no_fire:
-                                fire_pending = True
-                                pending_fire_context = make_fire_context(
-                                    current_time,
-                                    target_x,
-                                    target_y,
-                                    predict_x,
-                                    predict_y,
-                                    pan_val,
-                                    tilt_val,
-                                )
-                                if logger is not None:
-                                    logger.mark_fire(pending_fire_context)
+                        if burst_decision["should_request_fire"]:
+                            fire_pending = True
+                            pending_fire_context = make_fire_context(
+                                current_time,
+                                target_x,
+                                target_y,
+                                predict_x,
+                                predict_y,
+                                pan_val,
+                                tilt_val,
+                            )
+                            if logger is not None:
+                                logger.mark_fire(pending_fire_context)
                             last_burst_fire_time = current_time
                             cv2.putText(frame, "BURST FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                         else:
@@ -579,6 +605,8 @@ def run_camera(args: argparse.Namespace) -> None:
                     continue
 
                 cmd_queue.put(command)
+                if args.fire_debug and command_fire == 1:
+                    print(f"[FIRE-DEBUG] queued_fire_command={command}")
                 last_send_time = current_time
                 if target_x is None:
                     last_home_send_time = current_time
@@ -632,6 +660,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-mode-file", default=str(Path(__file__).with_name("control_mode.json")), help="JSON file written by voice recognition: {'mode':'single|burst|safe|guard'}.")
     parser.add_argument("--default-fire-mode", choices=["single", "burst", "safe", "guard"], default="single")
     parser.add_argument("--burst-interval", type=float, default=0.7, help="Seconds between repeated fire=1 requests in burst mode.")
+    parser.add_argument("--burst-fire-px", type=int, default=None, help="Burst-mode lock window in pixels. Defaults to --fire-px; increase for diagnostics if burst never reaches lock.")
+    parser.add_argument("--fire-debug", action="store_true", help="Print why fire=1 is or is not requested, especially in burst mode.")
+    parser.add_argument("--fire-debug-interval", type=float, default=0.5, help="Minimum seconds between repeated fire-debug lines with the same reason.")
     parser.add_argument("--guard-sweep-pan", type=command_value, default=70, help="Maximum pan command used for guard-mode sweep, -100..100.")
     parser.add_argument("--guard-sweep-speed", type=float, default=1.2, help="Guard-mode sweep speed multiplier.")
     parser.add_argument("--no-fire", action="store_true")

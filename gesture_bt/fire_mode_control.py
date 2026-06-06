@@ -97,3 +97,41 @@ def write_control_mode(
     mode_path.parent.mkdir(parents=True, exist_ok=True)
     mode_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return payload["mode"]
+
+
+def describe_burst_decision(
+    *,
+    current_time: float,
+    last_burst_fire_time: float,
+    burst_interval: float,
+    in_fire_window: bool,
+    no_fire: bool,
+    hub_program_running: bool | None,
+) -> dict[str, Any]:
+    """Explain whether burst mode should request fire=1 this frame.
+
+    This helper intentionally returns both the boolean decision and the blocking
+    reason so field tests can distinguish common failures: target not locked,
+    cooldown still active, --no-fire enabled, or the Hub user program stopped.
+    """
+    elapsed = max(0.0, float(current_time) - float(last_burst_fire_time))
+    interval = max(0.0, float(burst_interval))
+    cooldown_remaining = max(0.0, interval - elapsed)
+
+    if no_fire:
+        reason = "no_fire_flag"
+    elif hub_program_running is False:
+        reason = "hub_program_stopped"
+    elif not in_fire_window:
+        reason = "outside_fire_window"
+    elif cooldown_remaining > 0:
+        reason = "cooldown"
+    else:
+        reason = "ready"
+
+    return {
+        "should_request_fire": reason == "ready",
+        "reason": reason,
+        "elapsed_since_last_fire": elapsed,
+        "cooldown_remaining": cooldown_remaining,
+    }

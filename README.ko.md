@@ -143,8 +143,46 @@ echo '{"mode":"safe"}'   > control_mode.json   # 발사 금지
 echo '{"mode":"guard"}'  > control_mode.json   # 표적 미검출 시 좌우 sweep 경계 모드
 ```
 
-관련 옵션: `--default-fire-mode`, `--burst-interval`, `--guard-sweep-pan`,
-`--guard-sweep-speed`, `--control-mode-file`.
+관련 옵션: `--default-fire-mode`, `--burst-interval`, `--burst-fire-px`,
+`--fire-debug`, `--guard-sweep-pan`, `--guard-sweep-speed`, `--control-mode-file`.
+
+연발이 안 될 때는 먼저 아래처럼 **카메라/표적 인식 루프를 우회**해서 Hub와 C 모터가
+반복 발사 요청을 실제로 처리하는지 확인한다.
+
+```bash
+python burst_fire_diagnostic.py --hub-name "Team5" --shots 5 --interval 1.0 --print-sends --debug-rx
+```
+
+해석:
+
+- `[SEND] M,0,0,1`이 반복되고 Hub 로그에 `FIRE_REQ`, `SHOT`, `RETURNING`, `ARMED`,
+  `FIRED`가 반복되면 Hub/C 모터는 정상이고, 문제는 카메라 lock 조건이나 모드 JSON 쪽이다.
+- `[SEND] M,0,0,1`은 반복되는데 Hub의 `FIRE_REQ`/`SHOT`이 부족하면 C 모터가 아직
+  `armed`로 복귀하지 않았거나 포트/기계 장전 문제가 있다. 이때는 `--interval 1.2`처럼
+  간격을 늘려 본다.
+- 직접 진단은 성공하지만 `balloon_intercept.py`에서만 연발이 안 되면 아래처럼 실행해서
+  어떤 조건이 막는지 본다.
+
+```bash
+python balloon_intercept.py \
+  --hub-name "Team5" \
+  --control-mode-file control_mode.json \
+  --default-fire-mode burst \
+  --burst-interval 1.0 \
+  --burst-fire-px 60 \
+  --fire-debug \
+  --print-sends \
+  --debug-rx
+```
+
+`[FIRE-DEBUG]`의 주요 reason:
+
+- `outside_fire_window`: 예측점이 화면 중앙 lock window 밖이다. 표적을 중앙에 더 오래 두거나
+  테스트 중에는 `--burst-fire-px 60`처럼 키운다.
+- `cooldown`: `--burst-interval` 대기 중이다.
+- `no_fire_flag`: `--no-fire`로 실행 중이라 fire=1을 막고 있다.
+- `hub_program_stopped`: Hub 사용자 프로그램이 STOPPED 상태라 fire=1을 억제했다.
+- `ready`: 다음 전송에서 `fire=1` 요청이 나가야 한다.
 
 > 현재 업로드 경로는 실제 로봇에서 검증된 실행 경로다. Hub 전원을 켜고
 > Pybricks Code/SPIKE App 연결을 끊은 뒤, Mac 스크립트가 저장된 Hub 프로그램을
