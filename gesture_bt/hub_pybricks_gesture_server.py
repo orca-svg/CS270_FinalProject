@@ -56,15 +56,15 @@ TILT_HOME = -20   # Port D (tilt) at tilt bottom (tilt 0 deg)
 C_HOME = 43       # Port C (trigger) armed/rest position
 
 C_FIRE_TRAVEL = 190   # degrees the C trigger rotates per shot (relative to arm)
-C_FIRE_DC = 85
-C_RETURN_DC = 70
+C_FIRE_DC = 100
+C_RETURN_DC = 100
 C_TOLERANCE = 3
 C_LAUNCH_SPINUP_MS = 350
 C_FIRE_TIMEOUT_MS = 400
 C_RETURN_TIMEOUT_MS = 400
 
-LAUNCH_PWM_A = 75
-LAUNCH_PWM_B = -75
+LAUNCH_PWM_A = 100
+LAUNCH_PWM_B = -100
 SPIN_LAUNCH_ON_START = True
 
 keyboard = poll()
@@ -192,6 +192,9 @@ last_angle_print_ms = 0
 def main():
     global last_angle_print_ms
     stop_all()
+    # 기동하자마자 가속 휠 모터를 100%로 가동합니다.
+    if SPIN_LAUNCH_ON_START:
+        start_launcher_wheels()
 
     # Do NOT reset_angle. Resetting would redefine "0" at wherever the turret
     # physically sits at each (re)start, so after a reconnect-triggered restart
@@ -209,8 +212,22 @@ def main():
     )
     write_line("SERVER_VERSION " + SERVER_VERSION)
 
-    if SPIN_LAUNCH_ON_START:
-        start_launcher_wheels()
+    # 모터 최고 구동 속도 및 가속도 상향 설정 (조준 반응 속도 극대화)
+    # (언제든 롤백할 수 있도록 기본 제한값들을 주석으로 기록해 둡니다)
+    # 기본값: speed=약 360~480, acceleration=약 1200~1600 (하드웨어/배터리 상황에 따라 자동 정의)
+    if pan_motor:
+        try:
+            pan_motor.control.limits(speed=1000, acceleration=4000)
+        except Exception:
+            pass
+    if tilt_motor:
+        try:
+            # 위로 갈 때의 limits 보정은 메인 루프 안에서 동적으로 동작하므로,
+            # 여기서는 초기 기본 limits 한계치를 1000, 4000으로 설정해 줍니다.
+            tilt_motor.control.limits(speed=1000, acceleration=4000)
+        except Exception:
+            pass
+
     hub.display.text("BT")
     write_line("READY")
     write_line("ARMED")
