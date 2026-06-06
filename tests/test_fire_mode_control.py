@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "gesture_bt"))
 from fire_mode_control import (
     VALID_MODES,
     describe_burst_decision,
+    describe_visibility_fire_decision,
     make_control_payload,
     read_control_mode,
     write_control_mode,
@@ -83,29 +84,29 @@ class FireModeControlTests(unittest.TestCase):
             current_time=10.0,
             last_burst_fire_time=8.0,
             burst_interval=0.7,
-            in_fire_window=True,
+            target_visible=True,
             no_fire=False,
             hub_program_running=True,
         )
         self.assertTrue(ready["should_request_fire"])
         self.assertEqual(ready["reason"], "ready")
 
-        not_locked = describe_burst_decision(
+        not_visible = describe_burst_decision(
             current_time=10.0,
             last_burst_fire_time=8.0,
             burst_interval=0.7,
-            in_fire_window=False,
+            target_visible=False,
             no_fire=False,
             hub_program_running=True,
         )
-        self.assertFalse(not_locked["should_request_fire"])
-        self.assertEqual(not_locked["reason"], "outside_fire_window")
+        self.assertFalse(not_visible["should_request_fire"])
+        self.assertEqual(not_visible["reason"], "target_not_visible")
 
         cooling_down = describe_burst_decision(
             current_time=10.0,
             last_burst_fire_time=9.8,
             burst_interval=0.7,
-            in_fire_window=True,
+            target_visible=True,
             no_fire=False,
             hub_program_running=True,
         )
@@ -117,7 +118,7 @@ class FireModeControlTests(unittest.TestCase):
             current_time=10.0,
             last_burst_fire_time=8.0,
             burst_interval=0.7,
-            in_fire_window=True,
+            target_visible=True,
             no_fire=True,
             hub_program_running=True,
         )
@@ -128,12 +129,47 @@ class FireModeControlTests(unittest.TestCase):
             current_time=10.0,
             last_burst_fire_time=8.0,
             burst_interval=0.7,
-            in_fire_window=True,
+            target_visible=True,
             no_fire=False,
             hub_program_running=False,
         )
         self.assertFalse(hub_stopped["should_request_fire"])
         self.assertEqual(hub_stopped["reason"], "hub_program_stopped")
+
+    def test_visibility_fire_decision_requires_visible_target_for_0_4_seconds(self):
+        waiting = describe_visibility_fire_decision(
+            current_time=10.2,
+            target_first_seen_time=10.0,
+            required_visible_seconds=0.4,
+            target_visible=True,
+            no_fire=False,
+            hub_program_running=True,
+        )
+        self.assertFalse(waiting["should_request_fire"])
+        self.assertEqual(waiting["reason"], "visible_warmup")
+        self.assertAlmostEqual(waiting["remaining_visible_seconds"], 0.2)
+
+        ready = describe_visibility_fire_decision(
+            current_time=10.4,
+            target_first_seen_time=10.0,
+            required_visible_seconds=0.4,
+            target_visible=True,
+            no_fire=False,
+            hub_program_running=True,
+        )
+        self.assertTrue(ready["should_request_fire"])
+        self.assertEqual(ready["reason"], "ready")
+
+        lost = describe_visibility_fire_decision(
+            current_time=10.6,
+            target_first_seen_time=None,
+            required_visible_seconds=0.4,
+            target_visible=False,
+            no_fire=False,
+            hub_program_running=True,
+        )
+        self.assertFalse(lost["should_request_fire"])
+        self.assertEqual(lost["reason"], "target_not_visible")
 
 
 if __name__ == "__main__":

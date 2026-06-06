@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError as exc:
     raise SystemExit("Missing package. Install with: python -m pip install opencv-python numpy bleak") from exc
 
-from fire_mode_control import describe_burst_decision, read_control_mode
+from fire_mode_control import describe_burst_decision, describe_visibility_fire_decision, read_control_mode
 from pybricks_ble import DEFAULT_HUB_NAME, DryRunSender, PybricksBleSender, clamp
 
 
@@ -412,7 +412,7 @@ def run_camera(args: argparse.Namespace) -> None:
 
             if target_x is not None and target_y is not None:
                 if fire_state == REARM_WAIT:
-                    fire_state = FIRED_FOR_TARGET
+                    fire_state = TRACKING
                 target_lost_since = None
 
                 if target_first_seen_time is None:
@@ -473,7 +473,14 @@ def run_camera(args: argparse.Namespace) -> None:
 
                 # Fire policy is selected by the voice-control JSON file. The Hub
                 # protocol stays M,pan,tilt,fire; modes only change when fire=1 is sent.
-                detected_duration = current_time - target_first_seen_time
+                visibility_decision = describe_visibility_fire_decision(
+                    current_time=current_time,
+                    target_first_seen_time=target_first_seen_time,
+                    required_visible_seconds=args.target_visible_seconds,
+                    target_visible=True,
+                    no_fire=args.no_fire,
+                    hub_program_running=None,
+                )
                 if current_fire_mode == "safe":
                     fire_confirm_count = 0
                     fire_pending = False
@@ -482,33 +489,56 @@ def run_camera(args: argparse.Namespace) -> None:
                     cv2.putText(frame, "SAFE: FIRE DISABLED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
                 elif current_fire_mode == "burst":
                     fire_confirm_count = 0
-                    burst_fire_px = args.burst_fire_px if args.burst_fire_px is not None else args.fire_px
-                    in_burst_fire_window = abs(predict_x - center_x) < burst_fire_px and abs(predict_y - center_y) < burst_fire_px
-                    burst_decision = describe_burst_decision(
-                        current_time=current_time,
-                        last_burst_fire_time=last_burst_fire_time,
-                        burst_interval=args.burst_interval,
-                        in_fire_window=in_burst_fire_window,
-                        no_fire=args.no_fire,
-                        hub_program_running=None,
-                    )
-                    if args.fire_debug and (
-                        burst_decision["reason"] != last_burst_debug_reason
-                        or current_time - last_burst_debug_time >= args.fire_debug_interval
-                    ):
-                        dx = predict_x - center_x
-                        dy = predict_y - center_y
-                        print(
-                            "[FIRE-DEBUG] mode=burst "
-                            f"reason={burst_decision['reason']} "
-                            f"request={burst_decision['should_request_fire']} "
-                            f"dx={dx} dy={dy} window={burst_fire_px} "
-                            f"cooldown={burst_decision['cooldown_remaining']:.2f}s "
-                            f"state={fire_state} no_fire={args.no_fire}"
+                    if not visibility_decision["should_request_fire"]:
+                        if args.fire_debug and (
+                            visibility_decision["reason"] != last_burst_debug_reason
+                            or current_time - last_burst_debug_time >= args.fire_debug_interval
+                        ):
+                            print(
+                                "[FIRE-DEBUG] mode=burst "
+                                f"reason={visibility_decision['reason']} "
+                                f"visible_elapsed={visibility_decision['visible_elapsed']:.2f}s "
+                                f"remaining={visibility_decision['remaining_visible_seconds']:.2f}s "
+                                f"state={fire_state} no_fire={args.no_fire}"
+                            )
+                            last_burst_debug_reason = visibility_decision["reason"]
+                            last_burst_debug_time = current_time
+                        fire_state = TRACKING
+                        cv2.putText(
+                            frame,
+                            f"BURST LOCKING: {visibility_decision['remaining_visible_seconds']:.2f}s",
+                            (20, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8,
+                            (0, 255, 255),
+                            2,
                         )
-                        last_burst_debug_reason = burst_decision["reason"]
-                        last_burst_debug_time = current_time
-                    if in_burst_fire_window:
+                    else:
+                        burst_decision = describe_burst_decision(
+                            current_time=current_time,
+                            last_burst_fire_time=last_burst_fire_time,
+                            burst_interval=args.burst_interval,
+                            target_visible=True,
+                            no_fire=args.no_fire,
+                            hub_program_running=None,
+                        )
+                        if args.fire_debug and (
+                            burst_decision["reason"] != last_burst_debug_reason
+                            or current_time - last_burst_debug_time >= args.fire_debug_interval
+                        ):
+                            dx = predict_x - center_x
+                            dy = predict_y - center_y
+                            print(
+                                "[FIRE-DEBUG] mode=burst "
+                                f"reason={burst_decision['reason']} "
+                                f"request={burst_decision['should_request_fire']} "
+                                f"dx={dx} dy={dy} "
+                                f"visible_elapsed={visibility_decision['visible_elapsed']:.2f}s "
+                                f"cooldown={burst_decision['cooldown_remaining']:.2f}s "
+                                f"state={fire_state} no_fire={args.no_fire}"
+                            )
+                            last_burst_debug_reason = burst_decision["reason"]
+                            last_burst_debug_time = current_time
                         fire_state = LOCKED
                         if burst_decision["should_request_fire"]:
                             fire_pending = True
@@ -527,11 +557,9 @@ def run_camera(args: argparse.Namespace) -> None:
                             cv2.putText(frame, "BURST FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                         else:
                             cv2.putText(frame, "BURST LOCK", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 3)
-                    else:
-                        fire_state = TRACKING
                 else:
                     if fire_state in (TRACKING, LOCKED):
-                        if detected_duration >= 0.4:
+                        if visibility_decision["should_request_fire"]:
                             fire_state = LOCKED
                             if not args.no_fire:
                                 fire_pending = True
@@ -550,8 +578,15 @@ def run_camera(args: argparse.Namespace) -> None:
                             cv2.putText(frame, "FIRE", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                         else:
                             fire_state = TRACKING
-                            # 화면에 남은 시간 피드백 표시
-                            cv2.putText(frame, f"LOCKING: {0.4 - detected_duration:.2f}s", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                            cv2.putText(
+                                frame,
+                                f"LOCKING: {visibility_decision['remaining_visible_seconds']:.2f}s",
+                                (20, 80),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                1,
+                                (0, 255, 255),
+                                2,
+                            )
                     elif fire_state == FIRED_FOR_TARGET or fire_state == REARM_WAIT:
                         # 한번 쏘았으면 풍선을 계속 인식하고 있는 동안(세션이 끊기지 않는 동안) 추가 격발 방지
                         cv2.putText(frame, "FIRED", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
@@ -660,7 +695,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-mode-file", default=str(Path(__file__).with_name("control_mode.json")), help="JSON file written by voice recognition: {'mode':'single|burst|safe|guard'}.")
     parser.add_argument("--default-fire-mode", choices=["single", "burst", "safe", "guard"], default="single")
     parser.add_argument("--burst-interval", type=float, default=0.7, help="Seconds between repeated fire=1 requests in burst mode.")
-    parser.add_argument("--burst-fire-px", type=int, default=None, help="Burst-mode lock window in pixels. Defaults to --fire-px; increase for diagnostics if burst never reaches lock.")
+    parser.add_argument("--target-visible-seconds", type=nonnegative_float, default=0.4, help="Seconds a target must stay visible before single/burst can request fire=1.")
+    parser.add_argument("--burst-fire-px", type=int, default=None, help="Deprecated diagnostic option; burst now fires after --target-visible-seconds while target remains visible.")
     parser.add_argument("--fire-debug", action="store_true", help="Print why fire=1 is or is not requested, especially in burst mode.")
     parser.add_argument("--fire-debug-interval", type=float, default=0.5, help="Minimum seconds between repeated fire-debug lines with the same reason.")
     parser.add_argument("--guard-sweep-pan", type=command_value, default=70, help="Maximum pan command used for guard-mode sweep, -100..100.")

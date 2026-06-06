@@ -115,8 +115,8 @@ python balloon_intercept_win.py --hub-name "Team5" --print-sends
 
 | Mode | 동작 | Hub에 전달되는 실제 효과 |
 |------|------|--------------------------|
-| `single` | 표적 lock 후 1회 발사 | `fire=1`을 한 번만 보냄 |
-| `burst` | lock 상태에서 반복 발사 | `--burst-interval`마다 `fire=1` 요청. Hub가 `armed`일 때만 실제 발사 |
+| `single` | 표적이 처음 보인 뒤 0.4초 확인되면 1회 발사 | `fire=1`을 한 번만 보냄 |
+| `burst` | 표적이 처음 보인 뒤 0.4초 확인되면 반복 발사 시작 | 이후 `--burst-interval`마다 `fire=1` 요청. Hub가 `armed`일 때만 실제 발사 |
 | `safe` | 안전/발사 금지 | 조준은 하되 `fire=1`을 보내지 않음 |
 | `guard` | 표적 미검출 시 좌우 경계 sweep | `M,pan,tilt,0`에서 pan 값이 좌우로 변함. 표적 발견 시 single 정책 사용 |
 
@@ -137,14 +137,15 @@ python balloon_intercept_win.py --hub-name "Team5" --print-sends
 python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
 
 # 터미널 2: 음성 인식 대신 수동으로 모드 변경 테스트
-echo '{"mode":"single"}' > control_mode.json   # 정밀 단발
-echo '{"mode":"burst"}'  > control_mode.json   # lock 상태에서 --burst-interval마다 반복 발사
+echo '{"mode":"single"}' > control_mode.json   # 0.4초 확인 후 정밀 단발
+echo '{"mode":"burst"}'  > control_mode.json   # 0.4초 확인 후 --burst-interval마다 반복 발사
 echo '{"mode":"safe"}'   > control_mode.json   # 발사 금지
 echo '{"mode":"guard"}'  > control_mode.json   # 표적 미검출 시 좌우 sweep 경계 모드
 ```
 
-관련 옵션: `--default-fire-mode`, `--burst-interval`, `--burst-fire-px`,
+관련 옵션: `--default-fire-mode`, `--target-visible-seconds`, `--burst-interval`,
 `--fire-debug`, `--guard-sweep-pan`, `--guard-sweep-speed`, `--control-mode-file`.
+`--target-visible-seconds`의 기본값은 0.4초이며, 표적이 사라지면 타이머가 리셋된다.
 
 연발이 안 될 때는 먼저 아래처럼 **카메라/표적 인식 루프를 우회**해서 Hub와 C 모터가
 반복 발사 요청을 실제로 처리하는지 확인한다.
@@ -168,8 +169,8 @@ python balloon_intercept.py \
   --hub-name "Team5" \
   --control-mode-file control_mode.json \
   --default-fire-mode burst \
+  --target-visible-seconds 0.4 \
   --burst-interval 1.0 \
-  --burst-fire-px 60 \
   --fire-debug \
   --print-sends \
   --debug-rx
@@ -177,9 +178,9 @@ python balloon_intercept.py \
 
 `[FIRE-DEBUG]`의 주요 reason:
 
-- `outside_fire_window`: 예측점이 화면 중앙 lock window 밖이다. 표적을 중앙에 더 오래 두거나
-  테스트 중에는 `--burst-fire-px 60`처럼 키운다.
-- `cooldown`: `--burst-interval` 대기 중이다.
+- `visible_warmup`: 표적이 화면에 잡혔지만 아직 `--target-visible-seconds`만큼 유지되지 않았다.
+- `target_not_visible`: 표적이 현재 화면에서 사라져 0.4초 타이머가 리셋되었다.
+- `cooldown`: burst 모드에서 `--burst-interval` 대기 중이다.
 - `no_fire_flag`: `--no-fire`로 실행 중이라 fire=1을 막고 있다.
 - `hub_program_stopped`: Hub 사용자 프로그램이 STOPPED 상태라 fire=1을 억제했다.
 - `ready`: 다음 전송에서 `fire=1` 요청이 나가야 한다.
