@@ -1,12 +1,15 @@
 """Voice-command helper that writes fire modes into control_mode.json.
 
 This process is intentionally separate from the real-time camera loop. It listens
-for short voice commands, maps them to one of the supported presentation modes,
-and writes the existing JSON schema consumed by balloon_intercept.py:
+for a wake phrase plus a short voice command, maps the command to one of the
+supported presentation modes, and writes the existing JSON schema consumed by
+balloon_intercept.py:
 
     {"mode": "single|burst|safe|guard", "source": "voice", ...}
 
-Run this in a second terminal while the interceptor is running.
+Run this in a second terminal while the interceptor is running. Use
+``--dry-run-text`` for hardware-free verification, or ``--no-wake-word`` when a
+presenter wants every recognized phrase to be treated as a command.
 """
 
 from __future__ import annotations
@@ -83,6 +86,14 @@ INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+DEFAULT_WAKE_WORDS: tuple[str, ...] = (
+    "hey you",
+    "hey, you",
+    "hey u",
+    "hey-you",
+    "헤이 유",
+)
+
 
 def analyze_intent(text: str, *, default: str = "safe") -> str:
     """Map a voice transcript to one supported fire mode.
@@ -100,6 +111,28 @@ def analyze_intent(text: str, *, default: str = "safe") -> str:
             if keyword.casefold() in text_norm:
                 return mode
     return normalize_mode(default, default="safe")
+
+
+def parse_wake_words(value: str | None) -> tuple[str, ...]:
+    """Parse a comma-separated wake-word CLI value.
+
+    Empty input disables wake-word gating only when the caller also passes
+    ``--no-wake-word``; otherwise we keep the demo default conservative.
+    """
+    if value is None:
+        return DEFAULT_WAKE_WORDS
+    words = tuple(word.casefold().strip() for word in value.split(",") if word.strip())
+    return words or DEFAULT_WAKE_WORDS
+
+
+def is_wake_phrase(text: str, wake_words: tuple[str, ...] = DEFAULT_WAKE_WORDS) -> bool:
+    """Return True when a recognized phrase should wake the commander.
+
+    Speech-to-text punctuation and casing vary, so matching is deliberately
+    substring-based and case-insensitive, mirroring the collaborator prototype.
+    """
+    text_norm = str(text).casefold().strip()
+    return any(wake_word.casefold() in text_norm for wake_word in wake_words)
 
 
 def write_mode_from_transcript(path: str | Path, transcript: str, *, confidence: float | None = 0.99) -> str:
@@ -124,11 +157,14 @@ def run_commander(args: argparse.Namespace) -> None:
         ) from exc
 
     control_mode_file = Path(args.control_mode_file)
+    wake_words = parse_wake_words(args.wake_words)
 
     print("==================================================")
     print("🎙️ [AI Voice Commander] 음성 -> JSON 변환기 가동")
     print("==================================================")
     print(f"JSON output: {control_mode_file}")
+    if args.require_wake_word:
+        print(f"호출어 대기: {', '.join(wake_words)}")
 
     if args.initial_mode:
         initial_mode = write_control_mode(
@@ -144,11 +180,30 @@ def run_commander(args: argparse.Namespace) -> None:
     with sr.Microphone(device_index=args.device_index) as source:
         print("소음 적응 중...")
         recognizer.adjust_for_ambient_noise(source, duration=args.ambient_duration)
-        print("✅ 마이크 준비 완료! 명령어 대기 중")
+        if args.require_wake_word:
+            print("✅ 마이크 준비 완료! 호출어를 먼저 말해주세요. 예: 'Hey you'")
+        else:
+            print("✅ 마이크 준비 완료! 명령어 대기 중")
         print("예: 'single', 'burst', 'safe', 'guard' / '단발', '연발', '안전', '경계'")
+
+        is_awake = not args.require_wake_word
 
         while True:
             try:
+                if not is_awake:
+                    audio = recognizer.listen(
+                        source,
+                        timeout=args.listen_timeout,
+                        phrase_time_limit=args.phrase_time_limit,
+                    )
+                    text = recognizer.recognize_google(audio, language=args.language)
+                    if is_wake_phrase(text, wake_words):
+                        print("\n🔔 [활성화] 네, 명령을 말씀하세요! (예: Burst fire)")
+                        is_awake = True
+                    elif args.verbose:
+                        print(f'호출어 아님: "{text}"')
+                    continue
+
                 audio = recognizer.listen(
                     source,
                     timeout=args.listen_timeout,
@@ -157,7 +212,13 @@ def run_commander(args: argparse.Namespace) -> None:
                 text = recognizer.recognize_google(audio, language=args.language)
                 mode = write_mode_from_transcript(control_mode_file, text)
                 print(f'🗣️ "{text}" -> [{mode.upper()}]')
+                if args.require_wake_word:
+                    print("💤 명령 수행 완료. 다시 호출어 대기 모드로 돌아갑니다.\n")
+                    is_awake = False
             except sr.WaitTimeoutError:
+                if args.require_wake_word and is_awake:
+                    print("💤 입력 시간이 초과되어 다시 호출어 대기 모드로 돌아갑니다.\n")
+                    is_awake = False
                 continue
             except sr.UnknownValueError:
                 if args.verbose:
@@ -189,6 +250,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phrase-time-limit", type=float, default=3.0, help="Maximum seconds per command phrase.")
     parser.add_argument("--ambient-duration", type=float, default=1.0, help="Seconds used for ambient noise calibration.")
     parser.add_argument("--verbose", action="store_true", help="Print recognition errors instead of staying quiet.")
+    parser.add_argument(
+        "--wake-words",
+        default=",".join(DEFAULT_WAKE_WORDS[:3]),
+        help="Comma-separated wake phrases recognized before accepting a command.",
+    )
+    parser.add_argument(
+        "--no-wake-word",
+        dest="require_wake_word",
+        action="store_false",
+        help="Treat every recognized phrase as a command without waiting for 'Hey you'.",
+    )
+    parser.set_defaults(require_wake_word=True)
     parser.add_argument(
         "--dry-run-text",
         help="Do not open the microphone. Analyze this text once, write JSON, and exit.",

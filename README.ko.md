@@ -144,6 +144,7 @@ echo '{"mode":"guard"}'  > control_mode.json   # 표적 미검출 시 좌우 swe
 ```
 
 기은님 음성 인식 모듈을 붙일 때는 두 번째 터미널에서 `voice_commander.py`를 실행한다.
+기본값은 오작동 방지를 위해 먼저 `Hey you` 호출어를 들은 뒤 다음 문장을 명령으로 처리한다.
 이 프로세스가 마이크 음성을 `single`, `burst`, `safe`, `guard`로 해석해 같은
 `control_mode.json`에 기록하고, 요격 루프는 다음 프레임부터 변경된 모드를 읽는다.
 
@@ -153,7 +154,11 @@ python -m pip install -r requirements_gesture_bt.txt
 python -m pip install pyaudio
 
 # 터미널 2: 실제 마이크 음성 명령 -> control_mode.json
+# 기본 동작: "Hey you" 호출어 후 다음 문장을 명령으로 처리
 python voice_commander.py --control-mode-file control_mode.json --language en-US
+
+# 호출어 없이 모든 인식 문장을 바로 명령으로 처리하고 싶으면
+python voice_commander.py --control-mode-file control_mode.json --no-wake-word --language en-US
 
 # 한국어 명령으로 테스트하고 싶으면
 python voice_commander.py --control-mode-file control_mode.json --language ko-KR

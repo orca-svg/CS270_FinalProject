@@ -127,6 +127,7 @@ Implemented files:
 
 - `gesture_bt/fire_mode_control.py`: JSON payload builder/reader/writer, mode normalization, fallback handling.
 - `gesture_bt/control_mode.json`: Example file for the voice-recognition module to write.
+- `gesture_bt/voice_commander.py`: Voice-to-JSON bridge with `Hey you` wake-word gating and `--dry-run-text` verification.
 - `gesture_bt/balloon_intercept.py`: macOS/default controller mode policy.
 - `gesture_bt/balloon_intercept_win.py`: Windows-threaded controller mode policy.
 - `tests/test_fire_mode_control.py`: JSON schema, metadata, fallback, and writer tests.
@@ -140,11 +141,11 @@ timing and pan sweep. The Hub-side C-motor reload state machine
 # Terminal 1: run the interceptor
 python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
 
-# Terminal 2: manual mode test in place of voice recognition
-echo '{"mode":"single"}' > control_mode.json   # precision single-shot
-echo '{"mode":"burst"}'  > control_mode.json   # repeat fire every --burst-interval while locked
-echo '{"mode":"safe"}'   > control_mode.json   # never send fire=1
-echo '{"mode":"guard"}'  > control_mode.json   # sweep pan when no target is visible
+# Terminal 2: voice commander waits for 'Hey you', then writes command -> control_mode.json
+python voice_commander.py --control-mode-file control_mode.json --language en-US
+
+# If you want direct command mode without a wake phrase
+python voice_commander.py --control-mode-file control_mode.json --no-wake-word --language en-US
 ```
 
 Related options: `--default-fire-mode`, `--burst-interval`, `--guard-sweep-pan`,

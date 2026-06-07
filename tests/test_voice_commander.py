@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gesture_bt"))
 
-from voice_commander import analyze_intent, main, write_mode_from_transcript
+from voice_commander import analyze_intent, is_wake_phrase, main, parse_wake_words, write_mode_from_transcript
 
 
 class VoiceCommanderTests(unittest.TestCase):
@@ -25,6 +25,18 @@ class VoiceCommanderTests(unittest.TestCase):
     def test_analyze_intent_defaults_to_safe_for_unclear_text(self):
         self.assertEqual(analyze_intent("hello robot"), "safe")
         self.assertEqual(analyze_intent(""), "safe")
+
+    def test_wake_phrase_matching_handles_common_recognition_variants(self):
+        self.assertTrue(is_wake_phrase("Hey you please wake up"))
+        self.assertTrue(is_wake_phrase("hey, you"))
+        self.assertTrue(is_wake_phrase("hey u"))
+        self.assertFalse(is_wake_phrase("single precision shot"))
+
+    def test_custom_wake_words_are_parsed_from_cli_value(self):
+        wake_words = parse_wake_words("robot, computer")
+        self.assertTrue(is_wake_phrase("hello robot", wake_words))
+        self.assertTrue(is_wake_phrase("computer start", wake_words))
+        self.assertFalse(is_wake_phrase("hey you", wake_words))
 
     def test_write_mode_from_transcript_uses_project_json_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
