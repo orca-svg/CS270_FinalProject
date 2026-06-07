@@ -143,6 +143,36 @@ echo '{"mode":"safe"}'   > control_mode.json   # 발사 금지
 echo '{"mode":"guard"}'  > control_mode.json   # 표적 미검출 시 좌우 sweep 경계 모드
 ```
 
+기은님 음성 인식 모듈을 붙일 때는 두 번째 터미널에서 `voice_commander.py`를 실행한다.
+이 프로세스가 마이크 음성을 `single`, `burst`, `safe`, `guard`로 해석해 같은
+`control_mode.json`에 기록하고, 요격 루프는 다음 프레임부터 변경된 모드를 읽는다.
+
+```bash
+# 필요 시 음성 인식 의존성 설치. PyAudio는 OS별로 별도 설치가 필요할 수 있음.
+python -m pip install -r requirements_gesture_bt.txt
+python -m pip install pyaudio
+
+# 터미널 2: 실제 마이크 음성 명령 -> control_mode.json
+python voice_commander.py --control-mode-file control_mode.json --language en-US
+
+# 한국어 명령으로 테스트하고 싶으면
+python voice_commander.py --control-mode-file control_mode.json --language ko-KR
+
+# 마이크 없이 JSON 연동만 빠르게 확인
+python voice_commander.py --control-mode-file control_mode.json --dry-run-text "연발 모드"
+```
+
+지원 명령 예시:
+
+- `single`, `one`, `precision`, `단발`, `한 발`, `정밀` → `single`
+- `burst`, `auto`, `fire at will`, `연발`, `연사`, `자동` → `burst`
+- `safe`, `stop`, `cease`, `안전`, `정지`, `사격 중지` → `safe`
+- `guard`, `search`, `patrol`, `경계`, `수색`, `레이더` → `guard`
+
+주의: Hub에는 모드 문자열이 직접 전송되지 않고, 기존 4바이트 `M,pan,tilt,fire`
+프로토콜만 유지된다. 음성 모듈은 JSON만 쓰고, 실제 발사 타이밍 판단은
+`balloon_intercept.py`/`balloon_intercept_win.py`가 수행한다.
+
 관련 옵션: `--default-fire-mode`, `--target-visible-seconds`, `--burst-interval`,
 `--fire-debug`, `--guard-sweep-pan`, `--guard-sweep-speed`, `--control-mode-file`.
 `--target-visible-seconds`의 기본값은 0.4초이며, 표적이 사라지면 타이머가 리셋된다.
