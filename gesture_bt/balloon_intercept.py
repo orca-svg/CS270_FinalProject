@@ -17,6 +17,7 @@ import csv
 import math
 import re
 import time
+import urllib.request
 from pathlib import Path
 
 try:
@@ -24,6 +25,14 @@ try:
     import numpy as np
 except ModuleNotFoundError as exc:
     raise SystemExit("Missing package. Install with: python -m pip install opencv-python numpy bleak") from exc
+
+try:
+    import mediapipe as mp
+    from mediapipe.tasks import python as mp_tasks_python
+    from mediapipe.tasks.python import vision as mp_vision
+    HAS_MEDIAPIPE = True
+except Exception:
+    HAS_MEDIAPIPE = False
 
 from fire_mode_control import describe_burst_decision, describe_visibility_fire_decision, read_control_mode
 from pybricks_ble import PybricksBleSender
@@ -156,6 +165,58 @@ def pixel_to_motor_vals(px: int, py: int, frame_w: int, frame_h: int) -> tuple[i
     return pan_val, tilt_val
 
 
+DEFAULT_DETECTOR_URL = (
+    "https://storage.googleapis.com/mediapipe-models/object_detector/"
+    "efficientdet_lite0/float16/1/efficientdet_lite0.task"
+)
+DEFAULT_DETECTOR_PATH = Path(__file__).resolve().parent / "models" / "efficientdet_lite0.task"
+
+
+def ensure_detector_model(model_path: Path, model_url: str) -> Path:
+    model_path = model_path.expanduser().resolve()
+    if model_path.exists() and model_path.stat().st_size > 1000000:
+        return model_path
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Object Detector model not found. Downloading to: {model_path}")
+    try:
+        import ssl
+        context = ssl._create_unverified_context()
+        with urllib.request.urlopen(model_url, context=context) as response, open(model_path, 'wb') as out_file:
+            out_file.write(response.read())
+    except Exception as exc:
+        if model_path.exists():
+            try:
+                model_path.unlink()
+            except Exception:
+                pass
+        print("\n" + "="*80)
+        print("❌ [오류] 모델 파일을 자동 다운로드하지 못했습니다 (네트워크/SSL 연결 문제).")
+        print("아래 링크를 브라우저 주소창에 복사해서 모델 파일을 직접 다운로드해 주세요:")
+        print(f"🔗 {model_url}")
+        print(f"다운로드한 파일을 다음 위치에 저장해 주세요: {model_path}")
+        print("="*80 + "\n")
+        raise RuntimeError("Could not download the MediaPipe Object Detector model.") from exc
+    return model_path
+
+
+def create_object_detector(args: argparse.Namespace):
+    if not HAS_MEDIAPIPE:
+        raise SystemExit(
+            "MediaPipe is not installed. Install with: python -m pip install mediapipe"
+        )
+    model_path = ensure_detector_model(Path(args.model_path), args.model_url)
+    base_options = mp_tasks_python.BaseOptions(model_asset_path=str(model_path))
+    options = mp_vision.ObjectDetectorOptions(
+        base_options=base_options,
+        running_mode=mp_vision.RunningMode.VIDEO,
+        score_threshold=args.min_score,
+        category_allowlist=args.allowed_categories,
+        max_results=args.max_results,
+    )
+    return mp_vision.ObjectDetector.create_from_options(options)
+
+
 def red_mask(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask1 = cv2.inRange(hsv, np.array([0, 120, 70]), np.array([10, 255, 255]))
@@ -248,8 +309,13 @@ async def run_shooter(args: argparse.Namespace) -> None:
         last_burst_debug_time = 0.0
         last_burst_debug_reason = ""
 
+        detector = None
+        last_timestamp_ms = 0
+        if args.tracking_mode == "model":
+            detector = create_object_detector(args)
+
         print("[RUN] Balloon interception started. Press q in the camera window to quit.")
-        print(f"[MODE] default={current_fire_mode} control_file={control_mode_path}")
+        print(f"[MODE] tracking={args.tracking_mode} default={current_fire_mode} control_file={control_mode_path}")
 
         while True:
             ret, frame = cap.read()
@@ -257,7 +323,6 @@ async def run_shooter(args: argparse.Namespace) -> None:
                 break
             frame = cv2.flip(frame, 1)
 
-            contours, _ = cv2.findContours(red_mask(frame), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             target_x = None
             target_y = None
             predict_x = None
@@ -266,14 +331,90 @@ async def run_shooter(args: argparse.Namespace) -> None:
             pan_val = args.home_pan
             tilt_val = args.home_tilt
 
-            if contours:
-                contour = max(contours, key=cv2.contourArea)
-                if cv2.contourArea(contour) > args.min_area:
-                    x, y, w, h = cv2.boundingRect(contour)
-                    target_x = x + w // 2
-                    target_y = y + h // 2
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.circle(frame, (target_x, target_y), 5, (0, 255, 0), -1)
+            # 물리 거리 가시화를 위한 로컬 가중 상수
+            OBJECT_SIZE_CM = 20.0
+            FOCAL_LENGTH = 550.0
+
+            if args.tracking_mode == "model":
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb = np.ascontiguousarray(rgb)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+                timestamp_ms = int(time.monotonic() * 1000)
+                if timestamp_ms <= last_timestamp_ms:
+                    timestamp_ms = last_timestamp_ms + 1
+                last_timestamp_ms = timestamp_ms
+
+                detection_result = detector.detect_for_video(mp_image, timestamp_ms)
+
+                if detection_result.detections:
+                    best_detection = None
+                    best_area = 0
+                    for detection in detection_result.detections:
+                        bbox = detection.bounding_box
+                        area = bbox.width * bbox.height
+                        if area > best_area:
+                            best_area = area
+                            best_detection = detection
+
+                    for detection in detection_result.detections:
+                        bbox = detection.bounding_box
+                        cx = bbox.origin_x + bbox.width // 2
+                        cy = bbox.origin_y + bbox.height // 2
+
+                        pixel_size_item = max(bbox.width, bbox.height)
+                        Z_cm_item = (OBJECT_SIZE_CM * FOCAL_LENGTH) / pixel_size_item if pixel_size_item > 0 else 300.0
+
+                        category = detection.categories[0]
+
+                        if detection is best_detection:
+                            target_x = cx
+                            target_y = cy
+
+                            cv2.rectangle(frame, (bbox.origin_x, bbox.origin_y), 
+                                          (bbox.origin_x + bbox.width, bbox.origin_y + bbox.height), (0, 0, 255), 3)
+                            cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
+                            label = f"[TARGET] {category.category_name} ({int(category.score * 100)}%) - {int(Z_cm_item)}cm"
+                            cv2.putText(frame, label, (bbox.origin_x, bbox.origin_y - 5), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                        else:
+                            cv2.rectangle(frame, (bbox.origin_x, bbox.origin_y), 
+                                          (bbox.origin_x + bbox.width, bbox.origin_y + bbox.height), (0, 255, 0), 2)
+                            cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+                            label = f"{category.category_name} ({int(category.score * 100)}%) - {int(Z_cm_item)}cm"
+                            cv2.putText(frame, label, (bbox.origin_x, bbox.origin_y - 5), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            else:
+                contours, _ = cv2.findContours(red_mask(frame), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                valid_contours = []
+                for contour in contours:
+                    if cv2.contourArea(contour) > args.min_area:
+                        valid_contours.append(contour)
+
+                if valid_contours:
+                    target_contour = max(valid_contours, key=cv2.contourArea)
+
+                    for contour in valid_contours:
+                        x, y, w, h = cv2.boundingRect(contour)
+                        cx = x + w // 2
+                        cy = y + h // 2
+
+                        pixel_size_item = max(w, h)
+                        Z_cm_item = (OBJECT_SIZE_CM * FOCAL_LENGTH) / pixel_size_item if pixel_size_item > 0 else 300.0
+
+                        if contour is target_contour:
+                            target_x = cx
+                            target_y = cy
+
+                            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 3)
+                            cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
+                            label = f"[TARGET] balloon - {int(Z_cm_item)}cm"
+                            cv2.putText(frame, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                        else:
+                            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                            cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+                            label = f"balloon - {int(Z_cm_item)}cm"
+                            cv2.putText(frame, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
             current_time = time.time()
             if current_time - last_mode_read_time >= MODE_READ_INTERVAL:
@@ -564,6 +705,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-dataset",
         action="store_true",
         help="Disable fire-time dataset logging.",
+    )
+    
+    # Tracking Mode & MediaPipe config
+    parser.add_argument(
+        "--tracking-mode",
+        choices=["color", "model"],
+        default="color",
+        help="Select tracking method: 'color' (HSV contour) or 'model' (MediaPipe Object Detector)."
+    )
+    parser.add_argument(
+        "--model-path",
+        default=str(DEFAULT_DETECTOR_PATH),
+        help="Path to EfficientDet-Lite0 model file (used in model tracking mode)."
+    )
+    parser.add_argument(
+        "--model-url",
+        default=DEFAULT_DETECTOR_URL,
+        help="URL to download EfficientDet-Lite0 model if missing."
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.45,
+        help="Minimum confidence threshold for classification."
+    )
+    parser.add_argument(
+        "--allowed-categories",
+        nargs="+",
+        default=["sports ball"],
+        help="List of COCO categories allowed to be tracked and intercepted."
+    )
+    parser.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        help="Maximum number of objects to detect simultaneously in model tracking mode."
     )
     return parser
 
