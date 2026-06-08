@@ -17,6 +17,38 @@ Mac / laptop  ──Pybricks BLE (GATT c5f50002-…)──►  SPIKE Prime Hub  
 
 ---
 
+## 📝 최근 회의 정리: 최종 데모 AI 기능 방향
+
+회의에서는 “새 모델을 직접 학습시키는 것”보다 **기존 추적/발사 루프를 깨지 않고
+영상에서 설명 가능한 AI 활용 요소를 추가**하는 방향으로 정리했다. 특히 표적 추적과
+발사 정확도는 이미 지연에 민감하므로, 무거운 물체 분류 모델을 메인 루프에 직접 넣기보다
+노트북 쪽에서 모드 정책을 결정하고 Hub에는 기존 4바이트 명령만 보내는 구조를 유지한다.
+
+확정/우선순위:
+
+1. **음성 인식 기반 모드 전환**
+   - “단발/정밀 사격”, “연발/위협 사격”, “발사 중지”, “경계 모드”처럼 데모용으로
+     설명하기 좋은 모드를 음성/LLM 쪽에서 JSON으로 기록한다.
+   - 실시간 추적 루프는 그 JSON의 `mode`만 읽어서 `fire=1` 전송 정책을 바꾼다.
+2. **다중 색상/표적 대응은 보조 스토리라인**
+   - 풍선/비닐봉투 등 여러 낙하물을 검토했지만, 실제 성공률과 낙하 속도를 고려하면
+     풍선 중심 데모가 가장 안정적이다.
+   - 필요하면 색상 HSV 범위 확장이나 영상 편집/시연 시나리오로 “다양한 표적 대응”을
+     설명한다.
+3. **경계/레이더 모드는 시간 남을 때의 추가 요소**
+   - 표적이 없을 때 좌우로 sweep하며 감시하는 모습을 보여주면 방어 시스템 스토리텔링에
+     도움이 된다.
+   - 거리 센서/360도 회전은 하드웨어 여건에 따라 선택 사항으로 둔다.
+4. **Hub 프로토콜은 변경하지 않음**
+   - Hub는 계속 `M,pan,tilt,fire` 4바이트만 받는다.
+   - 모드 문자열은 Hub로 직접 보내지 않고, Mac/Windows 컨트롤러가 모드에 따라 `fire`와
+     pan sweep 명령을 조절한다. BLE 정렬 오류 위험을 줄이기 위한 결정이다.
+
+이번 브랜치(`feat/voice-fire-mode-json`)는 위 결정 중 **음성/LLM 모드 전환 + Windows 대응 +
+테스트/문서화**를 구현한 브랜치다.
+
+---
+
 ## 🚀 빠른 시작
 
 ```bash
@@ -55,7 +87,138 @@ python gesture_bt_controller.py --hub-name "Team5" --print-sends
 
 # 3) 풍선 / 표적 요격  (데모 주력)
 python balloon_intercept.py --hub-name "Team5" --print-sends
+
+# Windows에서는 OpenCV GUI를 메인 스레드에 두는 스레드 변형을 사용
+python balloon_intercept_win.py --hub-name "Team5" --print-sends
 ```
+
+음성 인식/LLM 모드 전환은 Hub 패킷 형식을 바꾸지 않고 Mac/Windows 컨트롤러의
+발사 정책으로 구현한다. 기은 쪽 음성 인식 프로세스가 `gesture_bt/control_mode.json`에
+`mode` 필드를 포함한 JSON을 써 주면, `balloon_intercept.py`와
+`balloon_intercept_win.py`가 이를 읽어 기존 `M,pan,tilt,fire` 명령의 `fire` byte
+전송 타이밍만 바꾼다.
+
+준엽 쪽 컨트롤러가 받는 JSON 형태는 아래와 같다. 필수 필드는 `mode` 하나이고,
+나머지는 음성 인식/LLM 디버깅 및 발표 시각화용 메타데이터라서 없어도 된다.
+
+```json
+{
+  "mode": "single",
+  "source": "voice",
+  "transcript": "단발 모드",
+  "confidence": 0.92,
+  "updated_at": "2026-06-06T12:00:00+09:00"
+}
+```
+
+허용 `mode`: `single`, `burst`, `safe`, `guard`.
+
+| Mode | 동작 | Hub에 전달되는 실제 효과 |
+|------|------|--------------------------|
+| `single` | 표적이 처음 보인 뒤 0.4초 확인되면 1회 발사 | `fire=1`을 한 번만 보냄 |
+| `burst` | 표적이 처음 보인 뒤 0.4초 확인되면 반복 발사 시작 | 이후 `--burst-interval`마다 `fire=1` 요청. Hub가 `armed`일 때만 실제 발사 |
+| `safe` | 안전/발사 금지 | 조준은 하되 `fire=1`을 보내지 않음 |
+| `guard` | 표적 미검출 시 좌우 경계 sweep | `M,pan,tilt,0`에서 pan 값이 좌우로 변함. 표적 발견 시 single 정책 사용 |
+
+구현 파일:
+
+- `gesture_bt/fire_mode_control.py`: JSON payload 생성/읽기/쓰기, mode 정규화, fallback 처리.
+- `gesture_bt/control_mode.json`: 음성 인식 모듈이 써야 하는 예시 입력 파일.
+- `gesture_bt/balloon_intercept.py`: macOS/기본 컨트롤러에 `single`, `burst`, `safe`, `guard` 반영.
+- `gesture_bt/balloon_intercept_win.py`: Windows 스레드 변형에도 동일 모드 정책 반영.
+- `tests/test_fire_mode_control.py`: JSON schema, metadata, fallback, writer 테스트.
+
+주의: Hub는 모드 문자열을 직접 알지 못한다. Hub에는 기존 4바이트 `M,pan,tilt,fire`만
+전달되고, 모드에 따른 판단은 노트북 컨트롤러가 수행한다. 따라서 발사 후 C 모터 재장전
+상태머신(`armed -> firing -> returning -> armed`)도 기존 Hub 코드 그대로 유지된다.
+
+```bash
+# 터미널 1: 요격 컨트롤러 실행
+python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
+
+# 터미널 2: 음성 인식 대신 수동으로 모드 변경 테스트
+echo '{"mode":"single"}' > control_mode.json   # 0.4초 확인 후 정밀 단발
+echo '{"mode":"burst"}'  > control_mode.json   # 0.4초 확인 후 --burst-interval마다 반복 발사
+echo '{"mode":"safe"}'   > control_mode.json   # 발사 금지
+echo '{"mode":"guard"}'  > control_mode.json   # 표적 미검출 시 좌우 sweep 경계 모드
+```
+
+기은님 음성 인식 모듈을 붙일 때는 두 번째 터미널에서 `voice_commander.py`를 실행한다.
+기본값은 오작동 방지를 위해 먼저 `Hey you` 호출어를 들은 뒤 다음 문장을 명령으로 처리한다.
+이 프로세스가 마이크 음성을 `single`, `burst`, `safe`, `guard`로 해석해 같은
+`control_mode.json`에 기록하고, 요격 루프는 다음 프레임부터 변경된 모드를 읽는다.
+
+```bash
+# 필요 시 음성 인식 의존성 설치. PyAudio는 OS별로 별도 설치가 필요할 수 있음.
+python -m pip install -r requirements_gesture_bt.txt
+python -m pip install pyaudio
+
+# 터미널 2: 실제 마이크 음성 명령 -> control_mode.json
+# 기본 동작: "Hey you" 호출어 후 다음 문장을 명령으로 처리
+python voice_commander.py --control-mode-file control_mode.json --language en-US
+
+# 호출어 없이 모든 인식 문장을 바로 명령으로 처리하고 싶으면
+python voice_commander.py --control-mode-file control_mode.json --no-wake-word --language en-US
+
+# 한국어 명령으로 테스트하고 싶으면
+python voice_commander.py --control-mode-file control_mode.json --language ko-KR
+
+# 마이크 없이 JSON 연동만 빠르게 확인
+python voice_commander.py --control-mode-file control_mode.json --dry-run-text "연발 모드"
+```
+
+지원 명령 예시:
+
+- `single`, `one`, `precision`, `단발`, `한 발`, `정밀` → `single`
+- `burst`, `auto`, `fire at will`, `연발`, `연사`, `자동` → `burst`
+- `safe`, `stop`, `cease`, `안전`, `정지`, `사격 중지` → `safe`
+- `guard`, `search`, `patrol`, `경계`, `수색`, `레이더` → `guard`
+
+주의: Hub에는 모드 문자열이 직접 전송되지 않고, 기존 4바이트 `M,pan,tilt,fire`
+프로토콜만 유지된다. 음성 모듈은 JSON만 쓰고, 실제 발사 타이밍 판단은
+`balloon_intercept.py`/`balloon_intercept_win.py`가 수행한다.
+
+관련 옵션: `--default-fire-mode`, `--target-visible-seconds`, `--burst-interval`,
+`--fire-debug`, `--guard-sweep-pan`, `--guard-sweep-speed`, `--control-mode-file`.
+`--target-visible-seconds`의 기본값은 0.4초이며, 표적이 사라지면 타이머가 리셋된다.
+
+연발이 안 될 때는 먼저 아래처럼 **카메라/표적 인식 루프를 우회**해서 Hub와 C 모터가
+반복 발사 요청을 실제로 처리하는지 확인한다.
+
+```bash
+python burst_fire_diagnostic.py --hub-name "Team5" --shots 5 --interval 1.0 --print-sends --debug-rx
+```
+
+해석:
+
+- `[SEND] M,0,0,1`이 반복되고 Hub 로그에 `FIRE_REQ`, `SHOT`, `RETURNING`, `ARMED`,
+  `FIRED`가 반복되면 Hub/C 모터는 정상이고, 문제는 카메라 lock 조건이나 모드 JSON 쪽이다.
+- `[SEND] M,0,0,1`은 반복되는데 Hub의 `FIRE_REQ`/`SHOT`이 부족하면 C 모터가 아직
+  `armed`로 복귀하지 않았거나 포트/기계 장전 문제가 있다. 이때는 `--interval 1.2`처럼
+  간격을 늘려 본다.
+- 직접 진단은 성공하지만 `balloon_intercept.py`에서만 연발이 안 되면 아래처럼 실행해서
+  어떤 조건이 막는지 본다.
+
+```bash
+python balloon_intercept.py \
+  --hub-name "Team5" \
+  --control-mode-file control_mode.json \
+  --default-fire-mode burst \
+  --target-visible-seconds 0.4 \
+  --burst-interval 1.0 \
+  --fire-debug \
+  --print-sends \
+  --debug-rx
+```
+
+`[FIRE-DEBUG]`의 주요 reason:
+
+- `visible_warmup`: 표적이 화면에 잡혔지만 아직 `--target-visible-seconds`만큼 유지되지 않았다.
+- `target_not_visible`: 표적이 현재 화면에서 사라져 0.4초 타이머가 리셋되었다.
+- `cooldown`: burst 모드에서 `--burst-interval` 대기 중이다.
+- `no_fire_flag`: `--no-fire`로 실행 중이라 fire=1을 막고 있다.
+- `hub_program_stopped`: Hub 사용자 프로그램이 STOPPED 상태라 fire=1을 억제했다.
+- `ready`: 다음 전송에서 `fire=1` 요청이 나가야 한다.
 
 > 현재 업로드 경로는 실제 로봇에서 검증된 실행 경로다. Hub 전원을 켜고
 > Pybricks Code/SPIKE App 연결을 끊은 뒤, Mac 스크립트가 저장된 Hub 프로그램을
@@ -74,6 +237,7 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 ```text
 gesture_bt/
   pybricks_ble.py                    # 공유 BLE 스캔 / 재연결 / readiness / 진단
+  fire_mode_control.py               # JSON 기반 single/burst/safe/guard 발사 모드 정책
   bt_manual_motor_test.py            # 카메라 없이 BLE + 모터 경로 테스트
   bt_verify_restart_shot.py          # 발사 + 강제 재시작 검증
   camera_check.py                    # macOS/OpenCV 카메라 권한 확인
@@ -220,6 +384,10 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 | `--min-area` | 빨간 contour 최소 면적 |
 | `--send-interval` | BLE 명령 최소 전송 간격 |
 | `--post-recovery-replay` | BLE/Hub 복구 직후 aim-only replay 시간; `fire=1`은 재전송하지 않음 |
+| `--control-mode-file` | 음성 인식/LLM 프로세스가 쓰는 모드 JSON 파일 경로 |
+| `--default-fire-mode` | JSON 파일이 없을 때 사용할 기본 모드: `single`, `burst`, `safe`, `guard` |
+| `--burst-interval` | `burst` 모드에서 반복 `fire=1` 요청 사이 최소 시간 |
+| `--guard-sweep-pan` / `--guard-sweep-speed` | `guard` 모드에서 표적 미검출 시 좌우 탐색 sweep 범위/속도 |
 | `--dataset` / `--no-dataset` | `SHOT`과 결합한 캘리브레이션 row를 `aim_dataset.csv`에 저장/비활성화 |
 | `--camera`, `--width`, `--height` | 카메라 인덱스와 프레임 크기 |
 | `--no-auto-start` | Mac 측 원격 START 비활성화 |
@@ -227,7 +395,50 @@ HSV로 빨간 표적을 감지하고, EMA로 부드럽게 추정한 속도 + 수
 | `--connect-attempts` | 포기 전 BLE 스캔/연결 재시도 횟수(기본 `5`) |
 | `--keep-hub-running` | 카메라 스크립트 종료 후에도 Hub 프로그램 유지(기본은 `STOP` 전송으로 재실행 준비) |
 
-### 4. 발사와 재연결 검증
+### 4. 모드 JSON 단위 테스트 / 로봇 없는 검증
+
+로봇 없이도 이번 브랜치의 핵심 로직은 아래 명령으로 검증할 수 있다.
+
+```bash
+# 저장소 루트에서 실행
+python3 -m py_compile gesture_bt/*.py
+python3 -m unittest tests.test_fire_mode_control -v
+git diff --check
+```
+
+예상 결과:
+
+```text
+Ran 6 tests ...
+OK
+```
+
+로봇 없이 `control_mode.json` 입출력 형태만 확인하려면:
+
+```bash
+cd gesture_bt
+python3 - <<'PY'
+from fire_mode_control import write_control_mode, read_control_mode
+write_control_mode("control_mode.json", "BURST", source="voice", transcript="연발 모드", confidence=0.95)
+print(read_control_mode("control_mode.json"))
+PY
+# 출력: burst
+```
+
+카메라/Hub 연결 전에는 `--no-fire`로 화면 overlay와 모드 전환 로그만 확인할 수 있다.
+
+```bash
+python balloon_intercept.py --no-fire --control-mode-file control_mode.json --print-sends
+```
+
+Windows에서는 같은 JSON 파일을 대상으로 아래처럼 실행한다.
+
+```powershell
+python balloon_intercept_win.py --no-fire --control-mode-file control_mode.json --print-sends
+'{"mode":"guard","source":"manual","transcript":"경계 모드"}' | Set-Content control_mode.json
+```
+
+### 5. 발사와 재연결 검증
 
 ```bash
 # 단발 발사 검증
@@ -271,6 +482,8 @@ python bt_verify_restart_shot.py --hub-name "Team5" --print-sends --debug-rx \
 | Mac 측 원격 START + `rdy` 흐름 제어 | ✅ | P2 |
 | 재연결 replay 보호: aim-only, `fire=1` 재전송 없음 | ✅ | P2 |
 | `SHOT f/d` 기반 발사 캘리브레이션 데이터 로깅 | ✅ | P5 |
+| 음성/LLM JSON 기반 `single`/`burst`/`safe`/`guard` 모드 전환 | ✅ | P2 |
+| Windows 풍선 요격 컨트롤러 모드 전환 대응 | ✅ | P2 |
 | 팀 역할 + README 대시보드 + 문서 | ✅ | P5 |
 | 카메라-포탑 캘리브레이션 회귀 | 🔜 | P5 · P2 |
 | 결정적 녹화 영상 리플레이 하네스 | 🔜 | P5 |

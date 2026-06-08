@@ -18,6 +18,39 @@ Windows-threaded variants (`*_win.py`) and no-robot offline tools
 
 ---
 
+## 📝 Recent meeting summary: final-demo AI direction
+
+The team decided to prioritize **AI features that are explainable in the final
+video without slowing the real-time tracking/fire loop**. Instead of training and
+running a heavy object-classification model inside the main loop, the laptop
+keeps the existing vision controller fast and changes only the firing policy
+based on a small JSON file written by the voice/LLM side.
+
+Confirmed direction:
+
+1. **Voice/LLM fire-mode switching**
+   - Voice commands select demo-friendly modes: precision single-shot, burst,
+     safe/no-fire, and guard/sentry.
+   - The real-time loop reads only the JSON `mode` field and changes when it
+     sends `fire=1`.
+2. **Multi-object/color handling remains a supporting story**
+   - Balloons remain the most reliable target for drop speed and hit success.
+   - Additional colors/objects can be explained through HSV expansion or demo
+     scripting if time allows.
+3. **Guard/radar mode is a lightweight extension**
+   - When no target is visible, the turret can sweep left/right to support the
+     defense-system story.
+   - 360-degree rotation or distance-sensor radar is optional hardware work.
+4. **Do not change the Hub protocol**
+   - The Hub continues to receive only the 4-byte `M,pan,tilt,fire` packet.
+   - Mode names stay on the laptop; the controller maps them to `fire` timing
+     and pan-sweep commands to avoid BLE packet-alignment risk.
+
+This branch (`feat/voice-fire-mode-json`) implements the voice/LLM JSON mode
+interface, Windows support, tests, and README/protocol documentation.
+
+---
+
 ## 🚀 Quick Start
 
 ```bash
@@ -57,7 +90,66 @@ python gesture_bt_controller.py --hub-name "Team5" --print-sends
 
 # 3) Balloon / target interception  (preferred demo)
 python balloon_intercept.py --hub-name "Team5" --print-sends
+
+# Windows: keep OpenCV on the main thread and Bleak on a background thread
+python balloon_intercept_win.py --hub-name "Team5" --print-sends
 ```
+
+Voice/LLM mode switching is implemented as a Mac/Windows controller policy, not
+as a Hub packet-format change. The voice-recognition process writes a JSON
+object with a `mode` field into `gesture_bt/control_mode.json`; `balloon_intercept.py` and
+`balloon_intercept_win.py` read that file and change only when they send
+`fire=1` in the existing `M,pan,tilt,fire` command.
+
+The controller-side JSON shape is below. Only `mode` is required; the remaining
+fields are optional metadata for voice/LLM debugging and presentation overlays.
+
+```json
+{
+  "mode": "single",
+  "source": "voice",
+  "transcript": "single-shot mode",
+  "confidence": 0.92,
+  "updated_at": "2026-06-06T12:00:00+09:00"
+}
+```
+
+Allowed `mode` values: `single`, `burst`, `safe`, `guard`.
+
+| Mode | Behavior | Actual effect sent to Hub |
+|------|----------|---------------------------|
+| `single` | Fire once after target lock | Sends one `fire=1` request |
+| `burst` | Repeat while locked | Sends `fire=1` every `--burst-interval`; the Hub fires only when `armed` |
+| `safe` | No-fire safety mode | Keeps aiming but never sends `fire=1` |
+| `guard` | Sweep when no target is visible | Sends changing pan values in `M,pan,tilt,0`; target engagement uses single policy |
+
+Implemented files:
+
+- `gesture_bt/fire_mode_control.py`: JSON payload builder/reader/writer, mode normalization, fallback handling.
+- `gesture_bt/control_mode.json`: Example file for the voice-recognition module to write.
+- `gesture_bt/voice_commander.py`: Voice-to-JSON bridge with `Hey you` wake-word gating and `--dry-run-text` verification.
+- `gesture_bt/balloon_intercept.py`: macOS/default controller mode policy.
+- `gesture_bt/balloon_intercept_win.py`: Windows-threaded controller mode policy.
+- `tests/test_fire_mode_control.py`: JSON schema, metadata, fallback, and writer tests.
+
+Note: the Hub never receives the mode string. It still receives only the existing
+4-byte `M,pan,tilt,fire` packet; the laptop controller maps modes into `fire`
+timing and pan sweep. The Hub-side C-motor reload state machine
+(`armed -> firing -> returning -> armed`) is unchanged.
+
+```bash
+# Terminal 1: run the interceptor
+python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
+
+# Terminal 2: voice commander waits for 'Hey you', then writes command -> control_mode.json
+python voice_commander.py --control-mode-file control_mode.json --language en-US
+
+# If you want direct command mode without a wake phrase
+python voice_commander.py --control-mode-file control_mode.json --no-wake-word --language en-US
+```
+
+Related options: `--default-fire-mode`, `--burst-interval`, `--guard-sweep-pan`,
+`--guard-sweep-speed`, and `--control-mode-file`.
 
 > The current uploaded runner is the working robot path. Keep the Hub powered,
 > disconnect Pybricks Code/SPIKE App, and let the Mac script auto-start the
@@ -76,6 +168,7 @@ python balloon_intercept.py --hub-name "Team5" --print-sends
 ```text
 gesture_bt/
   pybricks_ble.py                    # Shared BLE scan / reconnect / readiness / diagnostics
+  fire_mode_control.py               # Shared JSON-based single/burst/safe/guard fire-mode policy
   bt_manual_motor_test.py            # BLE + motor path test (no camera)
   bt_verify_restart_shot.py          # Fire + forced-restart verification
   camera_check.py                    # macOS/OpenCV camera permission check
@@ -228,6 +321,10 @@ continuous target receives aim-only packets until it disappears for
 | `--min-area` | Minimum red contour area |
 | `--send-interval` | Minimum BLE command interval |
 | `--post-recovery-replay` | Aim-only replay window after BLE/Hub recovery; fire commands are never replayed |
+| `--control-mode-file` | JSON file path written by voice/LLM process |
+| `--default-fire-mode` | Fallback mode when the JSON file is missing: `single`, `burst`, `safe`, `guard` |
+| `--burst-interval` | Minimum seconds between repeated `fire=1` requests in `burst` mode |
+| `--guard-sweep-pan` / `--guard-sweep-speed` | Sweep range/speed when `guard` mode has no visible target |
 | `--dataset` / `--no-dataset` | Save or disable `SHOT`-joined calibration rows in `aim_dataset.csv` |
 | `--camera`, `--width`, `--height` | Camera index and frame size |
 | `--no-auto-start` | Disable Mac-side remote START |
@@ -235,7 +332,51 @@ continuous target receives aim-only packets until it disappears for
 | `--connect-attempts` | BLE scan/connect retries before giving up (default `5`) |
 | `--keep-hub-running` | Leave the Hub program running after the camera script exits (default sends `STOP` so the Hub is ready to re-run) |
 
-### 4. Fire and reconnect verification
+### 4. Mode JSON unit test / no-robot verification
+
+The core logic in this branch can be verified without the robot:
+
+```bash
+# Run from the repository root
+python3 -m py_compile gesture_bt/*.py
+python3 -m unittest tests.test_fire_mode_control -v
+git diff --check
+```
+
+Expected result:
+
+```text
+Ran 6 tests ...
+OK
+```
+
+To verify only the `control_mode.json` read/write shape:
+
+```bash
+cd gesture_bt
+python3 - <<'PY'
+from fire_mode_control import write_control_mode, read_control_mode
+write_control_mode("control_mode.json", "BURST", source="voice", transcript="burst mode", confidence=0.95)
+print(read_control_mode("control_mode.json"))
+PY
+# output: burst
+```
+
+Before connecting the Hub, use `--no-fire` to check the overlay and mode-change
+logs without sending any firing request:
+
+```bash
+python balloon_intercept.py --no-fire --control-mode-file control_mode.json --print-sends
+```
+
+Windows uses the same JSON file:
+
+```powershell
+python balloon_intercept_win.py --no-fire --control-mode-file control_mode.json --print-sends
+'{"mode":"guard","source":"manual","transcript":"guard mode"}' | Set-Content control_mode.json
+```
+
+### 5. Fire and reconnect verification
 
 ```bash
 # Single-shot verification
@@ -279,6 +420,8 @@ Passing output includes `SERVER_VERSION gesture_server_2026_06_03_fire_spinup_st
 | Mac-side remote START + `rdy` flow control | ✅ | P2 |
 | Reconnect replay protection: aim-only, never `fire=1` | ✅ | P2 |
 | Fire calibration dataset logging on `SHOT f/d` | ✅ | P5 |
+| Voice/LLM JSON-based `single`/`burst`/`safe`/`guard` mode switching | ✅ | P2 |
+| Windows balloon-intercept controller mode support | ✅ | P2 |
 | Team roles + README dashboard + docs | ✅ | P5 |
 | Camera-to-turret calibration regression | 🔜 | P5 · P2 |
 | Deterministic recorded-video replay harness | 🔜 | P5 |
