@@ -95,22 +95,22 @@ DEFAULT_WAKE_WORDS: tuple[str, ...] = (
 )
 
 
-def analyze_intent(text: str, *, default: str = "safe") -> str:
+def analyze_intent(text: str, *, default: str | None = "safe") -> str | None:
     """Map a voice transcript to one supported fire mode.
 
     Long phrases are checked before short phrases so expressions like
-    "fire at will" or "한 발" are handled predictably. Returning safe by
-    default keeps the robot conservative when a transcript is unclear.
+    "fire at will" or "한 발" are handled predictably. Returning None by
+    default keeps the current mode unchanged when a transcript is unclear.
     """
     text_norm = str(text).casefold().strip()
     if not text_norm:
-        return normalize_mode(default, default="safe")
+        return default
 
     for mode, keywords in INTENT_KEYWORDS.items():
         for keyword in sorted(keywords, key=len, reverse=True):
             if keyword.casefold() in text_norm:
                 return mode
-    return normalize_mode(default, default="safe")
+    return default
 
 
 def parse_wake_words(value: str | None) -> tuple[str, ...]:
@@ -135,16 +135,19 @@ def is_wake_phrase(text: str, wake_words: tuple[str, ...] = DEFAULT_WAKE_WORDS) 
     return any(wake_word.casefold() in text_norm for wake_word in wake_words)
 
 
-def write_mode_from_transcript(path: str | Path, transcript: str, *, confidence: float | None = 0.99) -> str:
-    """Analyze one transcript, write control JSON, and return the selected mode."""
-    mode = analyze_intent(transcript)
-    return write_control_mode(
+def write_mode_from_transcript(path: str | Path, transcript: str, *, confidence: float | None = 0.99) -> str | None:
+    """Analyze one transcript, write control JSON if matched, and return the selected mode."""
+    mode = analyze_intent(transcript, default=None)
+    if mode is None:
+        return None
+    write_control_mode(
         path,
         mode,
         source="voice",
         transcript=transcript,
         confidence=confidence,
     )
+    return mode
 
 
 def run_commander(args: argparse.Namespace) -> None:
@@ -211,10 +214,13 @@ def run_commander(args: argparse.Namespace) -> None:
                 )
                 text = recognizer.recognize_google(audio, language=args.language)
                 mode = write_mode_from_transcript(control_mode_file, text)
-                print(f'🗣️ "{text}" -> [{mode.upper()}]')
-                if args.require_wake_word:
-                    print("💤 명령 수행 완료. 다시 호출어 대기 모드로 돌아갑니다.\n")
-                    is_awake = False
+                if mode is not None:
+                    print(f'🗣️ "{text}" -> [{mode.upper()}]')
+                    if args.require_wake_word:
+                        print("💤 명령 수행 완료. 다시 호출어 대기 모드로 돌아갑니다.\n")
+                        is_awake = False
+                else:
+                    print(f'🗣️ "{text}" -> [일치하는 명령어 없음, 무시]')
             except sr.WaitTimeoutError:
                 if args.require_wake_word and is_awake:
                     print("💤 입력 시간이 초과되어 다시 호출어 대기 모드로 돌아갑니다.\n")
@@ -244,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="safe",
         help="Mode written once on startup. Use empty string to skip.",
     )
-    parser.add_argument("--language", default="en-US", help="Google speech recognition language, e.g. en-US or ko-KR.")
+    parser.add_argument("--language", default="ko-KR", help="Google speech recognition language, e.g. ko-KR or en-US.")
     parser.add_argument("--device-index", type=int, default=None, help="Optional microphone device index.")
     parser.add_argument("--listen-timeout", type=float, default=2.0, help="Seconds to wait for speech before retrying.")
     parser.add_argument("--phrase-time-limit", type=float, default=3.0, help="Maximum seconds per command phrase.")
