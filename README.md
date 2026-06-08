@@ -141,8 +141,11 @@ timing and pan sweep. The Hub-side C-motor reload state machine
 # Terminal 1: run the interceptor
 python balloon_intercept.py --hub-name "Team5" --control-mode-file control_mode.json --print-sends
 
-# Terminal 2: voice commander waits for 'Hey you', then writes command -> control_mode.json
+# Terminal 2: voice commander waits for 'Hey you' (or '헤이 유'), then writes command -> control_mode.json
 python voice_commander.py --control-mode-file control_mode.json --language en-US
+
+# Natural commands include: fire/shoot -> single, open fire/rapid fire -> burst,
+# 발사/쏴 -> single, 연발/연사 -> burst (use --language ko-KR for Korean).
 
 # If you want direct command mode without a wake phrase
 python voice_commander.py --control-mode-file control_mode.json --no-wake-word --language en-US

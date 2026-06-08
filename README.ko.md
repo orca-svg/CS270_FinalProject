@@ -169,8 +169,8 @@ python voice_commander.py --control-mode-file control_mode.json --dry-run-text "
 
 지원 명령 예시:
 
-- `single`, `one`, `precision`, `단발`, `한 발`, `정밀` → `single`
-- `burst`, `auto`, `fire at will`, `연발`, `연사`, `자동` → `burst`
+- `single`, `one`, `precision`, `fire`, `shoot`, `발사`, `쏴`, `단발`, `한 발`, `정밀` → `single`
+- `burst`, `auto`, `fire at will`, `open fire`, `rapid fire`, `연발`, `연사`, `자동` → `burst`
 - `safe`, `stop`, `cease`, `안전`, `정지`, `사격 중지` → `safe`
 - `guard`, `search`, `patrol`, `경계`, `수색`, `레이더` → `guard`
 

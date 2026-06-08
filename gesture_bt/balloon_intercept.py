@@ -733,8 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allowed-categories",
         nargs="+",
-        default=["sports ball"],
-        help="List of COCO categories allowed to be tracked and intercepted."
+        default=None,
+        help="Optional COCO category filter. Omit to detect any supported object instead of only sports ball."
     )
     parser.add_argument(
         "--max-results",

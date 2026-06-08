@@ -41,12 +41,24 @@ INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "레이더",
     ),
     "single": (
+        "shoot the target",
+        "fire target",
+        "take the shot",
+        "shoot",
+        "fire",
+        "shot",
+        "launch",
         "single",
         "one",
         "target",
         "sniper",
         "precision",
         "semi",
+        "발사해",
+        "발사",
+        "쏴줘",
+        "쏴",
+        "사격",
         "단발",
         "한발",
         "한 발",
@@ -54,12 +66,14 @@ INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "저격",
     ),
     "burst": (
+        "fire at will",
+        "open fire",
+        "rapid fire",
         "burst",
         "auto",
         "automatic",
         "many",
         "rapid",
-        "fire at will",
         "continuous",
         "연발",
         "자동",
@@ -106,10 +120,19 @@ def analyze_intent(text: str, *, default: str = "safe") -> str:
     if not text_norm:
         return normalize_mode(default, default="safe")
 
+    candidates: list[tuple[int, str, str]] = []
     for mode, keywords in INTENT_KEYWORDS.items():
-        for keyword in sorted(keywords, key=len, reverse=True):
-            if keyword.casefold() in text_norm:
-                return mode
+        for keyword in keywords:
+            keyword_norm = keyword.casefold()
+            if keyword_norm in text_norm:
+                candidates.append((len(keyword_norm), keyword_norm, mode))
+    if candidates:
+        # Prefer the most specific phrase across all modes. This keeps natural
+        # commands like "open fire" / "fire at will" in burst mode while still
+        # allowing a bare "fire" to mean one precision shot. It also lets
+        # "cease fire" stay safe because "cease" is more specific than "fire".
+        candidates.sort(reverse=True)
+        return candidates[0][2]
     return normalize_mode(default, default="safe")
 
 
@@ -252,7 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true", help="Print recognition errors instead of staying quiet.")
     parser.add_argument(
         "--wake-words",
-        default=",".join(DEFAULT_WAKE_WORDS[:3]),
+        default=None,
         help="Comma-separated wake phrases recognized before accepting a command.",
     )
     parser.add_argument(
