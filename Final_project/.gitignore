@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env/
+*.zip
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Workspace / Editor configurations
+.vscode/
+.idea/
+
+# Local task / agent configurations
+.system_generated/
+.claude/
+.claude/settings.local.json
+.claude/launch.json
+CLAUDE.md
+
+# Local copies / generated model artifacts
+*복사본*
+gesture_bt/models/*.task
+gesture_bt/aim_dataset.csv
+gesture_bt/control_mode.json.lock
+
+# Other projects in this directory
+Final_project/
+Grid_project/
+grid_logic_visualizer/
+gesture_bt_package_v7_fixed_packet/
