@@ -224,9 +224,13 @@ def create_object_detector(args: argparse.Namespace):
 
 def red_mask(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
-    mask2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
-    mask = mask1 + mask2
+    # Red color range masks
+    mask_red1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
+    mask_red2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
+    # Green color range mask (Hue 35-85)
+    mask_green = cv2.inRange(hsv, np.array([35, 110, 65]), np.array([85, 255, 255]))
+    # Combine red and green masks
+    mask = mask_red1 + mask_red2 + mask_green
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)

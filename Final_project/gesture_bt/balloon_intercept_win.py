@@ -236,9 +236,12 @@ def create_object_detector(args: argparse.Namespace):
 def red_mask(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     # 빨간색 검출 조건을 더 빡빡하게 제한 (채도 최저 110, 명도 최저 65)
-    mask1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
-    mask2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
-    mask = mask1 + mask2
+    mask_red1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
+    mask_red2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
+    # 초록색 검출 조건 추가 (Hue 35-85, 채도/명도 필터링 수준 일치)
+    mask_green = cv2.inRange(hsv, np.array([35, 110, 65]), np.array([85, 255, 255]))
+    # 빨간색과 초록색 마스크 합병
+    mask = mask_red1 + mask_red2 + mask_green
 
     # 모폴로지 연산으로 조각난 마스크 구멍들을 메우고, 테두리 노이즈 제거 (5x5 둥근 커널 사용)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
