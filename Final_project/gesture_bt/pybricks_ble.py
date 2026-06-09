@@ -78,7 +78,12 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def i8(value: int | float) -> int:
-    return int(clamp(int(value), -100, 100)) & 0xFF
+    val = int(clamp(int(value), -100, 100))
+    # Route around value 3 to prevent sending 0x03 byte, which Pybricks
+    # MicroPython firmware interprets as a KeyboardInterrupt signal.
+    if val == 3:
+        val = 4
+    return val & 0xFF
 
 
 def packet_for(command: str) -> bytes:
