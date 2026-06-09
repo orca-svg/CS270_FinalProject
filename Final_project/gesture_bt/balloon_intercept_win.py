@@ -238,8 +238,8 @@ def red_mask(frame):
     # 빨간색 검출 조건을 더 빡빡하게 제한 (채도 최저 110, 명도 최저 65)
     mask_red1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
     mask_red2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
-    # 초록색 검출 조건 추가 (Hue 35-85, 채도/명도 필터링 수준 일치)
-    mask_green = cv2.inRange(hsv, np.array([35, 110, 65]), np.array([85, 255, 255]))
+    # 초록색 검출 조건 추가 및 투명 초록색 수용을 위해 임계값 대폭 완화 (Hue 35-90, 채도 >= 40, 명도 >= 50)
+    mask_green = cv2.inRange(hsv, np.array([35, 40, 50]), np.array([90, 255, 255]))
     # 빨간색과 초록색 마스크 합병
     mask = mask_red1 + mask_red2 + mask_green
 

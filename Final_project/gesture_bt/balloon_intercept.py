@@ -227,8 +227,8 @@ def red_mask(frame):
     # Red color range masks
     mask_red1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
     mask_red2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
-    # Green color range mask (Hue 35-85)
-    mask_green = cv2.inRange(hsv, np.array([35, 110, 65]), np.array([85, 255, 255]))
+    # Relaxed green color mask to support transparent green (Hue 35-90, Saturation >= 40, Value >= 50)
+    mask_green = cv2.inRange(hsv, np.array([35, 40, 50]), np.array([90, 255, 255]))
     # Combine red and green masks
     mask = mask_red1 + mask_red2 + mask_green
 
