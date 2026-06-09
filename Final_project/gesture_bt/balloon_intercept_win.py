@@ -238,10 +238,10 @@ def red_mask(frame):
     # 빨간색 검출 조건을 더 빡빡하게 제한 (채도 최저 110, 명도 최저 65)
     mask_red1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
     mask_red2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
-    # 초록색 검출 조건 추가 및 투명 초록색 수용을 위해 임계값 대폭 완화 (Hue 35-90, 채도 >= 40, 명도 >= 50)
-    mask_green = cv2.inRange(hsv, np.array([35, 40, 50]), np.array([90, 255, 255]))
-    # 빨간색과 초록색 마스크 합병
-    mask = mask_red1 + mask_red2 + mask_green
+    # 주황색 검출 조건 추가 및 투명 주황색 수용을 위해 임계값 대폭 완화 (Hue 10-25, 채도 >= 40, 명도 >= 50)
+    mask_orange = cv2.inRange(hsv, np.array([10, 40, 50]), np.array([25, 255, 255]))
+    # 빨간색과 주황색 마스크 합병
+    mask = mask_red1 + mask_red2 + mask_orange
 
     # 모폴로지 연산으로 조각난 마스크 구멍들을 메우고, 테두리 노이즈 제거 (5x5 둥근 커널 사용)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
