@@ -38,6 +38,16 @@ class CameraRecognitionTests(unittest.TestCase):
             with self.subTest(platform=red_mask.__module__):
                 self.assertEqual(cv2.countNonZero(red_mask(frame)), 0)
 
+    def test_borderline_yellow_is_detected_on_both_platforms(self):
+        hsv = np.zeros((100, 100, 3), dtype=np.uint8)
+        # Yellow range: Hue 24-34, Saturation >= 40, Value >= 50
+        hsv[25:75, 25:75] = (25, 45, 55)
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        for red_mask in self.red_masks:
+            with self.subTest(platform=red_mask.__module__):
+                self.assertGreaterEqual(cv2.countNonZero(red_mask(frame)), 2400)
+
 
 if __name__ == "__main__":
     unittest.main()

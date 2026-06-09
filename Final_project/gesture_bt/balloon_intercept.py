@@ -227,10 +227,10 @@ def red_mask(frame):
     # Red color range masks
     mask_red1 = cv2.inRange(hsv, np.array([0, 110, 65]), np.array([10, 255, 255]))
     mask_red2 = cv2.inRange(hsv, np.array([170, 110, 65]), np.array([180, 255, 255]))
-    # Relaxed orange color mask to support transparent/light orange (Hue 10-25, Saturation >= 40, Value >= 50)
-    mask_orange = cv2.inRange(hsv, np.array([10, 40, 50]), np.array([25, 255, 255]))
-    # Combine red and orange masks
-    mask = mask_red1 + mask_red2 + mask_orange
+    # Relaxed yellow color mask to support transparent/light yellow (Hue 24-34, Saturation >= 40, Value >= 50)
+    mask_yellow = cv2.inRange(hsv, np.array([24, 40, 50]), np.array([34, 255, 255]))
+    # Combine red and yellow masks
+    mask = mask_red1 + mask_red2 + mask_yellow
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
