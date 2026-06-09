@@ -157,7 +157,8 @@ class FireDatasetLogger:
 
 
 def pixel_to_motor_vals(px: int, py: int, frame_w: int, frame_h: int) -> tuple[int, int]:
-    pan_deg = (px - frame_w / 2) / (frame_w / 2) * PAN_MAX_DEG
+    # Invert the sign of pan error to fix inverted left/right tracking movement.
+    pan_deg = -((px - frame_w / 2) / (frame_w / 2) * PAN_MAX_DEG)
     pan_deg = max(-PAN_MAX_DEG, min(PAN_MAX_DEG, pan_deg))
     pan_val = int(pan_deg / PAN_MAX_DEG * 100)
 
